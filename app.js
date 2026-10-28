@@ -72,6 +72,7 @@ const Sinc = {
     if (store === 'lotes') chave = 'lote:' + obj.id;
     if (store === 'vendas' || store === 'movs') { obj.atualizado = now(); chave = (store === 'vendas' ? 'venda:' : 'mov:') + obj.id; }
     if (store === 'meta' && obj.k === 'tabela') chave = 'tabela:atual';
+    if (store === 'meta' && obj.k === 'custos') chave = 'custos:atual';
     if (store === 'produtos') { chave = 'catalogo:atual'; this.st.catVer = now(); }
     if (!chave) return;
     this.st.pend[chave] = ++this.cont; this.salvar();
@@ -86,6 +87,7 @@ const Sinc = {
     if (tipo === 'venda') { const o = S.vendas.find(x => x.id === id); return o && [{ ...base, tipo, id, loteId: o.loteId, atualizado: o.atualizado || o.ts, json: JSON.stringify(o) }]; }
     if (tipo === 'mov') { const o = S.movs.find(x => x.id === id); return o && [{ ...base, tipo, id, loteId: o.loteId, atualizado: o.atualizado || o.ts, json: JSON.stringify(o) }]; }
     if (tipo === 'tabela') { const em = S.tabelaInfo?.em || now(); return [{ ...base, tipo, id: 'atual', atualizado: em, json: JSON.stringify({ v: S.tabela, em, arq: S.tabelaInfo?.arq || '' }) }]; }
+    if (tipo === 'custos') { const em = S.custosInfo?.em || now(); return [{ ...base, tipo, id: 'atual', atualizado: em, json: JSON.stringify({ v: S.custos, em, arq: S.custosInfo?.arq || '' }) }]; }
     if (tipo === 'catalogo') { // a célula da planilha aceita 50 mil caracteres: o catálogo vai em partes de 30 mil (folga para o escape do JSON)
       const ver = this.st.catVer || now(); const txt = JSON.stringify([...S.produtos.values()].map(({ _rot, ...p }) => p)); const tam = 30000; const n = Math.ceil(txt.length / tam) || 1;
       return Array.from({ length: n }, (_, i) => ({ ...base, tipo: 'catalogo', id: 'parte' + i, atualizado: ver, json: JSON.stringify({ ver, i, n, txt: txt.slice(i * tam, (i + 1) * tam) }) }));
@@ -127,6 +129,7 @@ const Sinc = {
       await DB.put(t === 'lote' ? 'lotes' : t === 'venda' ? 'vendas' : 'movs', o, true); return true;
     }
     if (t === 'tabela') { if (S.tabelaInfo?.em && S.tabelaInfo.em >= o.em) return false; S.tabela = o.v || {}; S.tabelaInfo = { em: o.em, arq: o.arq }; await DB.put('meta', { k: 'tabela', v: S.tabela, em: o.em, arq: o.arq }, true); return true; }
+    if (t === 'custos') { if (S.custosInfo?.em && S.custosInfo.em >= o.em) return false; S.custos = o.v || {}; S.custosInfo = { em: o.em, arq: o.arq }; await DB.put('meta', { k: 'custos', v: S.custos, em: o.em, arq: o.arq }, true); return true; }
     if (t === 'catalogo') {
       if (this.st.catVer && this.st.catVer >= o.ver) return false;
       const pt = this.partes[o.ver] ||= []; pt[o.i] = o.txt;
@@ -157,7 +160,7 @@ function atualizarSelo() { const el = document.querySelector('.net'); if (!el) r
 
 // ---------- estado ----------
 const S = {
-  produtos: new Map(), lotes: [], vendas: [], movs: [], cfg: { vendedor: '', caixa: '', tema: 'dark', aparelho: '', cfopBonif: '5.910 / 6.910', cfopPerda: '5.927',
+  produtos: new Map(), lotes: [], vendas: [], movs: [], custos: {}, cfg: { vendedor: '', caixa: '', tema: 'dark', aparelho: '', cfopBonif: '5.910 / 6.910', cfopPerda: '5.927',
     taxas: { debito: 1.37, c1: 3.14, c2: 5.38, c3: 6.12, c4: 6.86, c5: 7.60, c6: 8.34 }, das: 0, comissaoPct: 0 }, tabela: {},
   view: 'home', loteId: null, tab: 'vender', busca: '', cat: '', todoCatalogo: false, esgotados: false,
   cart: [], cartDesc: 0, cartDescMotivo: '', pagamentos: [], sheet: null, contagemRevelada: false, infinite: null,
@@ -353,6 +356,22 @@ function fontePreco(p) {
   return ['erp', p.preco || 0];
 }
 const precoShow = p => fontePreco(p)[1];
+// Custo oficial = aba 12.1.Custos da modelagem (gerado por custos/gerar_custos_oficiais.py). Vale antes do custo do Tiny.
+// SKU -fem sem custo próprio usa o da versão masculina (política da aba 00.5).
+// alíquota efetiva do Simples (Anexo I, 3ª faixa) da modelagem v9.7, aba 15.Tributario: set/26 realizado 7,10%; out/26 projetado 7,02%
+const DAS_MODELAGEM = { pct: 7.02, ref: 'out/26', fonte: 'modelagem v9.7 · 15.Tributario' };
+function custoDe(sku) {
+  return S.custos[sku]?.c || (sku.endsWith('-fem') && S.custos[sku.slice(0, -4)]?.c) || S.produtos.get(sku)?.custo || 0;
+}
+async function importarCustos(file) {
+  const abas = await lerPlanilha(file); const t = {}; let n = 0;
+  for (const aba of abas) { const L = aba.linhas; if (!L.length) continue; const m = mapear(L); if (!m.sku || !m.custo) continue;
+    const cf = col(L[0], k => k === 'fonte'); const cb = col(L[0], k => k === 'base');
+    L.forEach(r => { const sku = String(r[m.sku] || '').trim(); const c = num(r[m.custo]); if (sku && c > 0) { t[sku] = { c, f: cf ? String(r[cf]) : '', b: cb ? String(r[cb]) : '' }; n++; } }); }
+  if (!n) throw new Error('Não achei as colunas de SKU e custo no arquivo.');
+  S.custos = t; S.custosInfo = { em: now(), arq: file.name }; await DB.put('meta', { k: 'custos', v: t, em: S.custosInfo.em, arq: file.name });
+  return n;
+}
 async function importarTabela(file) {
   const abas = await lerPlanilha(file); let n = 0; const t = {};
   for (const aba of abas) { const L = aba.linhas; if (!L.length) continue; const m = mapear(L);
@@ -448,6 +467,7 @@ function vConfig() {
   <label class="f">CFOP da bonificação<input class="i" name="cfopBonif" value="${esc(S.cfg.cfopBonif)}"></label>
   <label class="f">CFOP da perda de contagem<input class="i" name="cfopPerda" value="${esc(S.cfg.cfopPerda)}"></label></div>
   <div class="card"><h2>Margem por show</h2><p class="muted small">Alíquota efetiva do DAS (Simples Nacional), tratada como dedução da receita como na modelagem financeira. Comissão padrão é sugerida ao lançar a despesa.</p>
+  ${S.cfg.dasRef ? `<p class="small muted">Referência atual: ${esc(S.cfg.dasRef)}. Atualize todo mês depois do PGDAS-D (rotina em custos/ROTINA-CUSTOS.md).</p>` : ''}
   <div class="grid2"><label class="f">DAS efetivo (%)<input class="i" name="das" inputmode="decimal" value="${String(S.cfg.das || 0).replace('.', ',')}"></label>
   <label class="f">Comissão padrão (%)<input class="i" name="comissaoPct" inputmode="decimal" value="${String(S.cfg.comissaoPct || 0).replace('.', ',')}"></label></div></div>
   <div class="card"><h2>Taxas estimadas da InfinitePay (%)</h2><p class="muted small">Usadas antes de importar o extrato. Débito, crédito à vista, 2x e 3x vêm do extrato de out/26; 4x a 6x são estimativa: confirme no app da InfinitePay.</p>
@@ -474,6 +494,9 @@ function vCatalogo() {
   <label class="btn primary block">Importar planilha do Tiny<input type="file" accept=".xls,.xlsx,.csv" class="hide" data-in="catalogo"></label>
   <button class="btn block" style="margin-top:10px" data-a="baixarFotos">Guardar fotos para usar offline</button>
   <p class="muted small" id="fotosStatus"></p></div>
+  <div class="card"><h2>Custos oficiais (modelagem)</h2>
+  <p class="muted small">O CMV, a bonificação, a perda e a margem usam o custo da modelagem financeira (aba 12.1.Custos, base CPC 16). O custo do Tiny só vale para o SKU que não estiver no arquivo. Gerado por <b>custos/gerar_custos_oficiais.py</b>. ${Object.keys(S.custos).length ? `${Object.keys(S.custos).length} SKUs${S.custosInfo ? ' · ' + esc(S.custosInfo.arq) + ' · ' + fmtDT(S.custosInfo.em) : ''}.` : '<b>Nenhum arquivo importado: usando o custo do Tiny.</b>'}</p>
+  <label class="btn primary block">Importar custos oficiais<input type="file" accept=".csv,.xls,.xlsx" class="hide" data-in="custos"></label></div>
   <div class="card"><h2>Tabela de preços "Shows e Eventos"</h2>
   <p class="muted small">O preço de venda no show vem desta tabela (ou do pedido do lote), não do preço fixo do ERP. Aceita a exportação da lista de preços do Tiny ou qualquer planilha com SKU e preço. ${Object.keys(S.tabela).length ? `${Object.keys(S.tabela).length} SKUs na tabela${S.tabelaInfo ? ' · ' + esc(S.tabelaInfo.arq) + ' · ' + fmtDT(S.tabelaInfo.em) : ''}.` : '<b>Nenhuma tabela importada.</b>'}</p>
   <label class="btn primary block">Importar tabela Shows e Eventos<input type="file" accept=".csv,.xls,.xlsx" class="hide" data-in="tabela"></label></div>
@@ -712,7 +735,7 @@ function margem(l) {
   const F = fin(l); const conf = F.f.concluido; const shows = l.shows || [];
   const cols = shows.map(s => ({ id: s.id, nome: `${s.cidade}/${s.uf}`, data: s.data, rec: 0, das: 0, taxa: 0, cmv: 0, bonif: 0, perda: 0, desp: 0, despItens: [] }));
   const col = id => cols.find(c => c.id === id) || cols[0];
-  const custo = sku => S.produtos.get(sku)?.custo || 0; const semCusto = new Set();
+  const custo = sku => custoDe(sku); const semCusto = new Set();
   const cmvDe = (sku, q) => { const c = custo(sku); if (!c && q) semCusto.add(sku); return c * q; };
   // receita e CMV das vendas registradas, no show em que aconteceram
   vendasLote(l).forEach(v => { const c = col(v.showId); if (!c) return; c.rec += totalVenda(v).liq; v.itens.forEach(i => c.cmv += cmvDe(i.sku, i.qtd)); });
@@ -756,6 +779,7 @@ function tMargem(l) {
   const avisos = [];
   if (!M.conf) avisos.push('Prévia: a receita é a lançada no PDV. Conclua a conferência financeira para usar a venda conferida.');
   if (!S.cfg.das) avisos.push('DAS em 0%: informe a alíquota efetiva em ⚙ › Margem por show.');
+  if (!Object.keys(S.custos).length) avisos.push('Custos oficiais não importados: a margem usa o custo do Tiny, que está zerado em parte dos SKUs. Catálogo › Custos oficiais.');
   if (M.semCusto.length) avisos.push(`${M.semCusto.length} SKUs vendidos ou bonificados sem custo no cadastro (CMV subestimado): ${M.semCusto.slice(0, 6).map(esc).join(', ')}${M.semCusto.length > 6 ? '…' : ''}.`);
   if (!M.taxaReal) avisos.push('Taxas de cartão estimadas pela tabela em ⚙. Importe o extrato da InfinitePay no Relatório para usar as reais.');
   const shows = Object.fromEntries((l.shows || []).map(s => [s.id, s]));
@@ -1036,7 +1060,7 @@ const A = {
   sincAgora: async () => { toast('Sincronizando…'); await Sinc.ciclo(true); toast(Sinc.erro ? 'Erro: ' + Sinc.erro : `Sincronizado · ${Sinc.nPend()} pendentes`, null, !!Sinc.erro); if (S.view === 'config') render(); },
   enviarConfig: () => { const abertos = S.lotes.filter(l => l.status !== 'fechado'); const ids = new Set(abertos.map(l => l.id));
     const pac = { tipo: 'pacote', versao: 1, em: now(), de: S.cfg.caixa, produtos: [...S.produtos.values()].map(({ _rot, ...p }) => p), tabela: S.tabela, tabelaInfo: S.tabelaInfo,
-      cfg: { cfopBonif: S.cfg.cfopBonif, cfopPerda: S.cfg.cfopPerda, taxas: S.cfg.taxas, sincUrl: S.cfg.sincUrl || '', sincChave: S.cfg.sincChave || '' },
+      custos: S.custos, custosInfo: S.custosInfo, cfg: { cfopBonif: S.cfg.cfopBonif, cfopPerda: S.cfg.cfopPerda, taxas: S.cfg.taxas, das: S.cfg.das, dasRef: S.cfg.dasRef, comissaoPct: S.cfg.comissaoPct, sincUrl: S.cfg.sincUrl || '', sincChave: S.cfg.sincChave || '' },
       lotes: abertos, vendas: S.vendas.filter(v => ids.has(v.loteId)), movs: S.movs.filter(m => ids.has(m.loteId)) };
     baixar(`pdv-shows-configuracao-${today()}.json`, JSON.stringify(pac), 'application/json'); },
   backupTudo: () => baixar(`pdv-shows-backup-${today()}.json`, JSON.stringify({ tipo: 'backup', versao: 1, em: now(), produtos: [...S.produtos.values()], lotes: S.lotes, vendas: S.vendas, movs: S.movs }), 'application/json'),
@@ -1055,7 +1079,7 @@ async function salvarMov(fd) {
 document.addEventListener('submit', async ev => {
   const f = ev.target; const k = f.dataset.f; if (!k) return; ev.preventDefault(); const fd = new FormData(f);
   if (k === 'texto') { const r = S.sheet.res; const v = fd.get('v'); S.sheet = null; r && r(v); return; }
-  if (k === 'cfg') { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); S.cfg.das = num(fd.get('das')); S.cfg.comissaoPct = num(fd.get('comissaoPct')); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
+  if (k === 'cfg') { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); if (num(fd.get('das')) !== S.cfg.das) S.cfg.dasRef = `informado em ${fmtDT(now())} por ${S.cfg.vendedor || '—'}`; S.cfg.das = num(fd.get('das')); S.cfg.comissaoPct = num(fd.get('comissaoPct')); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
     const urlAntes = S.cfg.sincUrl; S.cfg.sincUrl = (fd.get('sincUrl') || '').trim(); S.cfg.sincChave = (fd.get('sincChave') || '').trim(); await saveCfg();
     if (Sinc.ativo() && S.cfg.sincUrl !== urlAntes) { // servidor novo: sobe tudo o que existe neste aparelho
       S.lotes.forEach(l => Sinc.st.pend['lote:' + l.id] = ++Sinc.cont); S.vendas.forEach(v => Sinc.st.pend['venda:' + v.id] = ++Sinc.cont); S.movs.forEach(m => Sinc.st.pend['mov:' + m.id] = ++Sinc.cont);
@@ -1104,6 +1128,7 @@ document.addEventListener('change', async ev => {
     if (t.dataset.in === 'catalogo') { const r = await importarCatalogo(f); toast(`${r.n} SKUs importados (${r.novos} novos)`); render(); }
     if (t.dataset.in === 'carga' && /\.pdf$/i.test(f.name)) { await lerCargaPdf(f, lote()); t.value = ''; return; }
     if (t.dataset.in === 'carga') { const r = await importarCarga(f, lote()); toast(`Carga: ${r.pecas} peças em ${r.linhas} SKUs${r.semCadastro ? ` · ${r.semCadastro} sem cadastro` : ''}`); render(); }
+    if (t.dataset.in === 'custos') { const n = await importarCustos(f); toast(`${n} custos oficiais importados`); render(); }
     if (t.dataset.in === 'tabela') { const n = await importarTabela(f); const batem = Object.keys(S.tabela).filter(k => S.produtos.has(k)).length;
       toast(S.produtos.size ? `Tabela Shows e Eventos: ${n} preços · ${batem} batem com o catálogo` : `Tabela salva (${n} preços). Importe o catálogo para ver os produtos.`); render(); }
     if (t.dataset.in === 'infinite') { await lerInfinite(f, lote()); render(); }
@@ -1189,7 +1214,7 @@ function csvTiny(l) {
   const br = v => v.toFixed(2).replace('.', ',');
   const L = [['ID', 'Código (SKU)', 'Descrição', 'Estoque Inicial', 'Venda (qtd)', 'Venda preço médio', 'Venda total', `Bonificação (qtd) CFOP ${S.cfg.cfopBonif}`, `Perda (qtd) CFOP ${S.cfg.cfopPerda}`, 'Sobra (qtd)', 'Retorno ao estoque', 'Custo unit.', 'Observação da divergência']];
   Object.entries(sd).filter(([, x]) => x.carga || x.vendido || x.mov).sort().forEach(([s, x]) => { const p = S.produtos.get(s) || {}; const fin = ret[s]; const dif = fin === undefined ? 0 : fin - x.saldo;
-    L.push([p.id || '', s, p.descricao || '', x.carga, x.vendido, x.vendido ? br(x.valor / x.vendido) : '', br(x.valor), x.mov, dif < 0 ? -dif : 0, dif > 0 ? dif : 0, fin ?? '', p.custo ? br(p.custo) : '', (l.obsDif || {})[s] || '']); });
+    L.push([p.id || '', s, p.descricao || '', x.carga, x.vendido, x.vendido ? br(x.valor / x.vendido) : '', br(x.valor), x.mov, dif < 0 ? -dif : 0, dif > 0 ? dif : 0, fin ?? '', custoDe(s) ? br(custoDe(s)) : '', (l.obsDif || {})[s] || '']); });
   baixar(nomeArq(l) + '.csv', '﻿' + L.map(r => r.map(c => /[;"\n]/.test(String(c)) ? `"${String(c).replace(/"/g, '""')}"` : c).join(';')).join('\r\n'), 'text/csv;charset=utf-8');
 }
 // Três arquivos no layout "importar pedidos" do Tiny: venda (só o vendido, preço médio real), bonificação e perda (a custo).
@@ -1208,8 +1233,8 @@ function csvTinyPedido(l, tipo) {
     const p = S.produtos.get(s) || {};
     let q = 0, v = 0;
     if (tipo === 'venda') { q = it.q; v = it.q ? it.valor / it.q : 0; } // preço médio real, depois da conferência financeira
-    if (tipo === 'bonif') { q = it.bonif; v = p.custo || 0; }
-    if (tipo === 'perda') { q = it.perda; v = p.custo || 0; }
+    if (tipo === 'bonif') { q = it.bonif; v = custoDe(s); }
+    if (tipo === 'perda') { q = it.perda; v = custoDe(s); }
     if (!q) return;
     const L = Object.fromEntries(CAB_TINY.map(k => [k, '']));
     Object.assign(L, { 'ID': '0', 'Data': new Date().toLocaleDateString('pt-BR'), 'ID contato': '0', 'Nome do contato*': c.nome, 'Tipo de Pessoa': c.tipo, 'CPF/CNPJ': c.doc, 'RG/IE': c.ie, 'CEP': c.cep, 'Município': c.mun, 'UF': c.uf,
@@ -1236,6 +1261,7 @@ async function receberCaixa(file) {
     if (pac.tipo === 'pacote') { // configuração completa: catálogo e tabela substituem os deste aparelho
       if (pac.produtos?.length) { pac.produtos.forEach(p => S.produtos.set(p.sku, p)); await DB.bulk('produtos', pac.produtos, true); }
       if (pac.tabela && Object.keys(pac.tabela).length) { S.tabela = pac.tabela; S.tabelaInfo = pac.tabelaInfo || { em: pac.em, arq: 'configuração' }; await DB.put('meta', { k: 'tabela', v: S.tabela, em: S.tabelaInfo.em, arq: S.tabelaInfo.arq }, true); }
+      if (pac.custos && Object.keys(pac.custos).length) { S.custos = pac.custos; S.custosInfo = pac.custosInfo || { em: pac.em, arq: 'configuração' }; await DB.put('meta', { k: 'custos', v: S.custos, em: S.custosInfo.em, arq: S.custosInfo.arq }, true); }
       if (pac.cfg) { S.cfg = { ...S.cfg, ...pac.cfg, taxas: { ...S.cfg.taxas, ...(pac.cfg.taxas || {}) } }; await saveCfg(); }
     } else for (const p of pac.produtos || []) if (!S.produtos.has(p.sku)) { S.produtos.set(p.sku, p); await DB.put('produtos', p); }
     for (const l of lotes) { const meu = S.lotes.find(x => x.id === l.id);
@@ -1260,7 +1286,7 @@ function relatorioHTML(l) {
   const semSaldo = vendasLote(l).flatMap(v => v.itens.filter(i => i.semSaldo).map(i => ({ ...i, num: v.num, motivo: i.semSaldo })));
   const descs = vendasLote(l).filter(v => v.desconto);
   const soma = (arr, f) => arr.reduce((a, x) => a + f(x), 0);
-  const custo = x => x.p.custo || 0;
+  const custo = x => custoDe(x.s);
   const vendidos = linhas.filter(x => x.vendido), bonif = linhas.filter(x => x.mov), perdas = linhas.filter(x => x.perda), sobras = linhas.filter(x => x.sobra);
   const dev = linhas.filter(x => x.ret);
   return `<div class="hdr"><div><img src="marca/logo-positivo.svg" alt="Indião Store"><div class="tit">Relatório de vendas em show · ${fech ? 'FINAL' : 'PARCIAL'}</div></div>
@@ -1349,9 +1375,11 @@ addEventListener('online', () => { render(); Sinc.ciclo(); }); addEventListener(
   await DB.open();
   const [ps, ls, vs, ms, meta] = await Promise.all(['produtos', 'lotes', 'vendas', 'movs', 'meta'].map(s => DB.all(s)));
   ps.forEach(p => S.produtos.set(p.sku, p)); S.lotes = ls; S.vendas = vs; S.movs = ms;
+  const cu = meta.find(m => m.k === 'custos'); if (cu) { S.custos = cu.v || {}; S.custosInfo = { em: cu.em, arq: cu.arq }; }
   const tb = meta.find(m => m.k === 'tabela'); if (tb) { S.tabela = tb.v || {}; S.tabelaInfo = { em: tb.em, arq: tb.arq }; }
   const cfg = meta.find(m => m.k === 'cfg'); if (cfg) S.cfg = { ...S.cfg, ...cfg.v, taxas: { ...S.cfg.taxas, ...(cfg.v.taxas || {}) } };
   if (!S.cfg.aparelho) { S.cfg.aparelho = uid(); saveCfg(); }
+  if (!S.cfg.das) { S.cfg.das = DAS_MODELAGEM.pct; S.cfg.dasRef = `${DAS_MODELAGEM.ref} · ${DAS_MODELAGEM.fonte}`; saveCfg(); }
   const sc = meta.find(m => m.k === 'sinc'); if (sc) Sinc.st = { ...Sinc.st, ...sc.v }; Sinc.cont = Math.max(0, ...Object.values(Sinc.st.pend));
   render();
   setInterval(() => { if (document.visibilityState === 'visible') Sinc.ciclo(); }, 15000); Sinc.ciclo();
