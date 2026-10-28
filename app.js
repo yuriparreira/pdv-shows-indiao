@@ -156,7 +156,8 @@ const Sinc = {
     return n ? ['off', `● sinc. ${n} pend.`] : ['on', '● sincronizado'];
   },
 };
-function atualizarSelo() { const el = document.querySelector('.net'); if (!el) return; const [c, t] = Sinc.selo(); el.className = 'net ' + c; el.textContent = t; }
+const seloHTML = t => t.replace(/^● /, '●<span class="txt"> ') + '</span>';
+function atualizarSelo() { const el = document.querySelector('.net[data-v=config]'); if (!el) return; const [c, t] = Sinc.selo(); el.className = 'net ' + c; el.innerHTML = seloHTML(t); }
 
 // ---------- estado ----------
 const S = {
@@ -167,6 +168,22 @@ const S = {
 };
 const lote = () => S.lotes.find(l => l.id === S.loteId);
 const saveCfg = () => DB.put('meta', { k: 'cfg', v: S.cfg });
+// Perfis. Vendedor: vender, bonificar e contar. Gestor (PIN): lotes, carga, catálogo, financeiro, margem, relatórios e configurações.
+// O PIN fica só como hash no aparelho e vai no pacote de configuração. Sem PIN definido, o app fica em modo gestor.
+// Controle operacional (não substitui senha de servidor: quem tiver o celular e souber mexer no navegador consegue contornar).
+const Perfil = { ate: 0 };
+const gestor = () => !S.cfg.pinHash || Date.now() < Perfil.ate;
+async function hashPin(pin) { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('indiao-pdv:' + pin)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join(''); }
+async function entrarGestor() {
+  const pin = await perguntar({ titulo: 'Entrar como gestor', texto: 'Funções de gestor: lotes, carga, catálogo, financeiro, margem, relatórios e configurações.', tipo: 'pin', ph: 'PIN do gestor', obrig: true, ok: 'Entrar' });
+  S.sheet = null; if (!pin) { render(); return false; }
+  if (await hashPin(pin) !== S.cfg.pinHash) { render(); toast('PIN incorreto', null, true); return false; }
+  Perfil.ate = Date.now() + 15 * 60e3; render(); toast('Modo gestor (sai sozinho após 15 min parado)'); return true;
+}
+const ABAS_VENDEDOR = ['vender', 'movs', 'contagem'];
+const SO_GESTOR = new Set(['importarCaixa', 'destravar', 'fecharLote', 'corrigirData', 'precoItem', 'reabrirFin', 'concluirFin', 'enviarConfig', 'backupTudo', 'sincAgora',
+  'novaDesp', 'rmDesp', 'novoAjuste', 'rmAjuste', 'addOutro', 'rmOutro', 'csvTiny', 'tinyCsv', 'pdf', 'cancelarVenda', 'cancelarMov', 'contarCarga', 'precoModelo', 'baixarFotos', 'ajusteDeTx']);
+const precisaGestor = el => { const a = el.dataset.a; return SO_GESTOR.has(a) || (a === 'ir' && ['novo', 'catalogo'].includes(el.dataset.v)) || (a === 'tab' && !ABAS_VENDEDOR.includes(el.dataset.t)); };
 const saveLote = l => { l.atualizado = now(); return DB.put('lotes', l); };
 
 // ---------- catálogo ----------
@@ -421,28 +438,32 @@ function render() {
   document.documentElement.dataset.theme = S.cfg.tema === 'light' ? 'light' : 'dark';
   const app = $('#app');
   const v = S.view;
-  if (v === 'home') app.innerHTML = vHome();
-  else if (v === 'novo') app.innerHTML = vNovo();
-  else if (v === 'catalogo') app.innerHTML = vCatalogo();
-  else if (v === 'config') app.innerHTML = vConfig();
-  else if (v === 'lote') app.innerHTML = vLote();
+  if (!gestor() && ['novo', 'catalogo'].includes(v)) S.view = 'home';
+  if (S.view === 'lote' && !gestor() && !ABAS_VENDEDOR.includes(S.tab)) S.tab = 'vender';
+  if (S.view === 'home') app.innerHTML = vHome();
+  else if (S.view === 'novo') app.innerHTML = vNovo();
+  else if (S.view === 'catalogo') app.innerHTML = vCatalogo();
+  else if (S.view === 'config') app.innerHTML = vConfig();
+  else if (S.view === 'lote') app.innerHTML = vLote();
   renderSheet();
 }
 function topo(titulo, sub, voltar, extra = '') {
   return `<header class="top">${voltar ? `<button class="iconbtn" data-a="voltar" aria-label="Voltar">‹</button>` : ''}
   ${titulo === null ? `<img class="logo" src="marca/logo-negativo.svg" alt="Indião Store"><h1><span class="sub">${esc(sub)}</span></h1>` : `<h1>${esc(titulo)}${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</h1>`}${extra}
-  <span class="net ${Sinc.selo()[0]}" data-a="ir" data-v="config">${Sinc.selo()[1]}</span></header><div class="faixa"></div>`;
+  ${S.cfg.pinHash ? `<button class="net ${gestor() ? 'on' : ''}" data-a="perfil" aria-label="Trocar perfil">${gestor() ? '🔓<span class="txt"> gestor</span>' : '👤<span class="txt"> vendedor</span>'}</button>` : ''}
+  <span class="net ${Sinc.selo()[0]}" data-a="ir" data-v="config">${seloHTML(Sinc.selo()[1])}</span></header><div class="faixa"></div>`;
 }
 function vHome() {
   const lotes = [...S.lotes].sort((a, b) => (b.criado || '').localeCompare(a.criado || ''));
   const semCfg = !S.cfg.vendedor;
   return topo(null, 'PDV Shows', false, `<button class="iconbtn" data-a="ir" data-v="config" aria-label="Configurações">⚙</button>`) + `<main>
   ${semCfg ? `<div class="warn">Antes do primeiro show: em ⚙ informe seu nome e o nome deste caixa.</div>` : ''}
-  <button class="btn primary block" data-a="ir" data-v="novo" style="margin-bottom:12px">+ Novo lote de show</button>
+  ${!S.cfg.pinHash ? `<div class="warn">Sem PIN de gestor: qualquer pessoa acessa tudo. Defina o PIN em ⚙ para o modo vendedor (só venda, bonificação e contagem).</div>` : ''}
+  ${gestor() ? `<button class="btn primary block" data-a="ir" data-v="novo" style="margin-bottom:12px">+ Novo lote de show</button>
   <div class="grid2" style="margin-bottom:16px">
     <button class="btn" data-a="ir" data-v="catalogo">Catálogo (${S.produtos.size})</button>
     <button class="btn" data-a="importarCaixa">Receber arquivo</button>
-  </div>
+  </div>` : `<p class="muted small">Modo vendedor: abra o lote do show. Para criar lote ou importar arquivos, toque em "👤 vendedor" e entre com o PIN do gestor.</p>`}
   ${lotes.length ? lotes.map(l => { const r = resumo(l); const sh = l.shows || [];
     return `<button class="card" style="width:100%;text-align:left" data-a="abrirLote" data-id="${l.id}">
       <div class="row"><b class="grow">${l.pedido ? 'Pedido ' + esc(l.pedido) : 'Lote sem pedido'}</b><span class="pill ${l.status}">${l.status}</span></div>
@@ -475,6 +496,9 @@ function vConfig() {
   <label class="f">Seu nome (vendedor)<input class="i" name="vendedor" value="${esc(S.cfg.vendedor)}" required></label>
   <label class="f">Nome deste caixa / aparelho<input class="i" name="caixa" value="${esc(S.cfg.caixa)}" placeholder="ex.: Caixa 1 · Maquininha 6368" required></label>
   <label class="f">Tema<select class="i" name="tema"><option value="dark" ${S.cfg.tema !== 'light' ? 'selected' : ''}>Escuro (show à noite)</option><option value="light" ${S.cfg.tema === 'light' ? 'selected' : ''}>Claro (sol forte)</option></select></label>
+  ${!gestor() ? `<button class="btn primary block">Salvar</button></form><div class="card" style="margin-top:16px"><h2>Perfil</h2><p class="muted small">Modo vendedor: vender, lançar bonificação e contar. O restante é do gestor.</p><button class="btn block" data-a="perfil">Entrar como gestor</button></div></main>` : `
+  <div class="card"><h2>PIN do gestor</h2><p class="muted small">${S.cfg.pinHash ? 'PIN definido. Para trocar, digite um novo.' : 'Sem PIN, qualquer pessoa acessa tudo.'} Com PIN, o app abre em modo vendedor (venda, bonificação e contagem) e o gestor entra pelo selo "👤 vendedor" no topo. O PIN vai junto no "Enviar configuração".</p>
+  <div class="grid2"><label class="f">Novo PIN (4 a 8 números)<input class="i" name="pinNovo" type="password" inputmode="numeric" autocomplete="off"></label><label class="f">Repetir PIN<input class="i" name="pinConf" type="password" inputmode="numeric" autocomplete="off"></label></div></div>
   <div class="card"><h2>Notas à parte (relatório)</h2>
   <label class="f">CFOP da bonificação<input class="i" name="cfopBonif" value="${esc(S.cfg.cfopBonif)}"></label>
   <label class="f">CFOP da perda de contagem<input class="i" name="cfopPerda" value="${esc(S.cfg.cfopPerda)}"></label></div>
@@ -496,7 +520,7 @@ function vConfig() {
   <button class="btn block" data-a="enviarConfig">Enviar configuração</button></div>
   <div class="card"><h2>Armazenamento</h2><p class="muted small" id="persist">Verificando…</p>
   <button class="btn block" data-a="backupTudo">Baixar backup completo</button></div>
-  <p class="muted small">Versão 1.3 · ${Sinc.ativo() ? 'Sincronizando com a planilha da Indião quando houver internet.' : 'Os dados ficam só neste aparelho até você exportar.'}</p></main>`;
+  <p class="muted small">Versão 1.6 · ${Sinc.ativo() ? 'Sincronizando com a planilha da Indião quando houver internet.' : 'Os dados ficam só neste aparelho até você exportar.'}</p></main>`}`;
 }
 function vCatalogo() {
   const ps = [...S.produtos.values()]; const mods = agrupar(ps);
@@ -540,7 +564,7 @@ const rotulo = p => [p.var?.Cor, p.var?.Tamanho].filter(Boolean).join(' · ') ||
 function vLote() {
   const l = lote(); if (!l) { S.view = 'home'; return vHome(); }
   const sh = showAtual(l); const fechado = l.status !== 'aberto';
-  const tabs = [['vender', 'Vender'], ['vendas', 'Vendas'], ['movs', 'Bonificações'], ['contagem', 'Contagem'], ['financeiro', 'Financeiro'], ['margem', 'Margem'], ['relatorio', 'Relatório']];
+  const tabs = [['vender', 'Vender'], ['vendas', 'Vendas'], ['movs', 'Bonificações'], ['contagem', 'Contagem'], ['financeiro', 'Financeiro'], ['margem', 'Margem'], ['relatorio', 'Relatório']].filter(([k]) => gestor() || ABAS_VENDEDOR.includes(k));
   let body = '';
   if (S.tab === 'vender') body = fechado ? `<div class="warn">${l.status === 'fechado' ? 'Lote fechado. Veja o Relatório.' : 'Vendas travadas para a contagem. Termine a contagem na aba Contagem.'}</div>${l.status === 'contagem' ? '<button class="btn block" data-a="destravar">Destravar vendas (zera a contagem)</button>' : ''}` : tVender(l);
   if (S.tab === 'vendas') body = tVendas(l);
@@ -556,6 +580,7 @@ function vLote() {
     <main>${body}</main>${S.tab === 'vender' && !fechado ? cartBar() : ''}`;
 }
 function tVender(l) {
+  if (!Object.keys(l.carga || {}).length && !gestor()) return `<div class="card"><h2>Falta a carga deste lote</h2><p class="muted small">O gestor precisa importar o pedido "Shows e Eventos" antes das vendas. Toque em "👤 vendedor" para entrar com o PIN.</p></div>`;
   if (!Object.keys(l.carga || {}).length) return `<div class="card"><h2>Falta a carga deste lote</h2>
     <p class="muted small">A carga é o que foi retirado do estoque no pedido "Shows e Eventos". A venda só mostra esses itens. Sem carga, o app não controla o saldo.</p>
     <label class="btn primary block">Importar pedido do Tiny (CSV)<input type="file" accept=".csv,.xls,.xlsx" class="hide" data-in="carga"></label>
@@ -879,7 +904,8 @@ function shShow() {
   return `<div class="row"><h3 class="grow">Show atual</h3><button class="iconbtn" data-a="fechar">✕</button></div>
   <p class="muted small">As vendas entram no show marcado. Troque ao chegar na próxima cidade; a carga continua a mesma do lote.</p>
   ${(l.shows || []).map(s => `<button class="card" style="width:100%;text-align:left;${at && at.id === s.id ? 'border:2px solid var(--orange)' : ''}" data-a="usarShow" data-id="${s.id}"><div class="row"><b class="grow">${at && at.id === s.id ? '📍 ' : ''}${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</b>${at && at.id === s.id ? '<span class="pill aberto">ATUAL</span>' : ''}</div><div class="muted small">${esc(s.evento || '')}</div></button>`).join('')}
-  ${l.status === 'aberto' ? `<form data-f="novoShow" class="card"><h2>Adicionar show</h2>
+  <button class="btn block" style="margin-bottom:12px" data-a="exportarCaixa">Enviar minhas vendas (caixa) para o principal</button>
+  ${l.status === 'aberto' && gestor() ? `<form data-f="novoShow" class="card"><h2>Adicionar show</h2>
     <label class="f">Cidade<input class="i" name="cidade" required></label>
     <div class="grid2"><label class="f">UF<select class="i" name="uf" required><option value="">--</option>${UFS.map(u => `<option ${at && at.uf === u ? 'selected' : ''}>${u}</option>`).join('')}</select></label><label class="f">Data<input class="i" type="date" name="data" value="${dataNoite()}" required></label></div>
     <label class="f">Evento / local<input class="i" name="evento"></label><button class="btn primary block">Adicionar e usar</button></form>` : ''}`;
@@ -937,7 +963,7 @@ function shAjuste() {
 function shTexto() {
   const st = S.sheet;
   return `<h3>${esc(st.titulo)}</h3>${st.texto ? `<p class="muted">${esc(st.texto)}</p>` : ''}<form data-f="texto">
-  ${st.semInput ? '<input type="hidden" name="v" value="ok">' : `<input class="i" style="width:100%;margin:10px 0" name="v" value="${esc(st.valor || '')}" ${st.tipo === 'num' ? 'inputmode="decimal"' : ''} placeholder="${esc(st.ph || '')}" ${st.obrig ? 'required' : ''} autofocus>`}
+  ${st.semInput ? '<input type="hidden" name="v" value="ok">' : `<input class="i" style="width:100%;margin:10px 0" name="v" value="${esc(st.valor || '')}" ${st.tipo === 'num' ? 'inputmode="decimal"' : ''} placeholder="${esc(st.ph || '')}" ${st.obrig ? 'required' : ''} ${st.tipo === 'pin' ? 'type="password" inputmode="numeric" autocomplete="off"' : ''} autofocus>`}
   ${st.chips ? `<div class="chips">${st.chips.map(c => `<button type="button" class="chip" data-a="chipTexto" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>` : ''}
   <div class="grid2"><button type="button" class="btn" data-a="fechar">Cancelar</button><button class="btn ${st.perigo ? 'danger' : 'primary'}">${esc(st.ok || 'OK')}</button></div></form>`;
 }
@@ -1027,6 +1053,7 @@ const A = {
   ret: async e => { const l = lote(); if (l.status === 'aberto') { toast('Primeiro toque em "Travar vendas"', null, true); return; } l.retorno ||= {}; const s = e.dataset.s; l.retorno[s] = Math.max(0, (l.retorno[s] || 0) + +e.dataset.d); await saveLote(l); const inp = document.querySelector(`input[data-in=ret][data-s="${CSS.escape(s)}"]`); if (inp) inp.value = l.retorno[s]; vibrate(10); },
   revelar: () => { const l = lote(); if (l.status === 'aberto') { toast('Primeiro toque em "Travar vendas"', null, true); return; } S.contagemRevelada = true; render(); window.scrollTo(0, 0); },
   recontar: () => { S.contagemRevelada = false; render(); },
+  perfil: () => { if (S.cfg.pinHash && gestor()) { Perfil.ate = 0; S.view = S.view === 'lote' ? 'lote' : 'home'; if (!ABAS_VENDEDOR.includes(S.tab)) S.tab = 'vender'; render(); toast('Modo vendedor'); } else entrarGestor(); },
   corrigirData: async e => { const l = lote(); const sh = showAtual(l); (l.historico ||= []).push({ ts: now(), acao: 'data do show corrigida', motivo: `${sh.cidade}: ${fmtD(sh.data)} → ${fmtD(e.dataset.d)}`, quem: S.cfg.vendedor });
     sh.data = e.dataset.d; await saveLote(l); render(); toast('Data do show corrigida'); },
   dataCerta: async e => { const l = lote(); showAtual(l).dataConferida = e.dataset.d; await saveLote(l); render(); },
@@ -1064,7 +1091,7 @@ const A = {
   pdf: () => { $('#print').innerHTML = relatorioHTML(lote()); setTimeout(() => window.print(), 50); },
   csvTiny: () => csvTiny(lote()),
   tinyCsv: e => csvTinyPedido(lote(), e.dataset.t),
-  exportarCaixa: () => exportarCaixa(lote()),
+  exportarCaixa: () => { S.sheet = null; exportarCaixa(lote()); },
   importarCaixa: () => { const i = document.createElement('input'); i.type = 'file'; i.accept = '.json,application/json'; i.onchange = () => i.files[0] && receberCaixa(i.files[0]); i.click(); },
   contarCarga: async () => { const l = lote(); l.carga = {}; l.cargaManual = true; S.todoCatalogo = true; await saveLote(l); toast('Toque no produto, escolha cor e tamanho e informe a quantidade'); A.cargaManual(); },
   cargaManual: () => { S.sheet = { k: 'mov', tipo: '__carga' }; MOV.__carga = 'Carga'; renderSheet(); },
@@ -1073,7 +1100,7 @@ const A = {
   sincAgora: async () => { toast('Sincronizando…'); await Sinc.ciclo(true); toast(Sinc.erro ? 'Erro: ' + Sinc.erro : `Sincronizado · ${Sinc.nPend()} pendentes`, null, !!Sinc.erro); if (S.view === 'config') render(); },
   enviarConfig: () => { const abertos = S.lotes.filter(l => l.status !== 'fechado'); const ids = new Set(abertos.map(l => l.id));
     const pac = { tipo: 'pacote', versao: 1, em: now(), de: S.cfg.caixa, produtos: [...S.produtos.values()].map(({ _rot, ...p }) => p), tabela: S.tabela, tabelaInfo: S.tabelaInfo,
-      custos: S.custos, custosInfo: S.custosInfo, cfg: { cfopBonif: S.cfg.cfopBonif, cfopPerda: S.cfg.cfopPerda, taxas: S.cfg.taxas, das: S.cfg.das, dasRef: S.cfg.dasRef, comissaoPct: S.cfg.comissaoPct, sincUrl: S.cfg.sincUrl || '', sincChave: S.cfg.sincChave || '' },
+      custos: S.custos, custosInfo: S.custosInfo, cfg: { cfopBonif: S.cfg.cfopBonif, cfopPerda: S.cfg.cfopPerda, taxas: S.cfg.taxas, das: S.cfg.das, dasRef: S.cfg.dasRef, comissaoPct: S.cfg.comissaoPct, pinHash: S.cfg.pinHash || '', sincUrl: S.cfg.sincUrl || '', sincChave: S.cfg.sincChave || '' },
       lotes: abertos, vendas: S.vendas.filter(v => ids.has(v.loteId)), movs: S.movs.filter(m => ids.has(m.loteId)) };
     baixar(`pdv-shows-configuracao-${today()}.json`, JSON.stringify(pac), 'application/json'); },
   backupTudo: () => baixar(`pdv-shows-backup-${today()}.json`, JSON.stringify({ tipo: 'backup', versao: 1, em: now(), produtos: [...S.produtos.values()], lotes: S.lotes, vendas: S.vendas, movs: S.movs }), 'application/json'),
@@ -1092,7 +1119,10 @@ async function salvarMov(fd) {
 document.addEventListener('submit', async ev => {
   const f = ev.target; const k = f.dataset.f; if (!k) return; ev.preventDefault(); const fd = new FormData(f);
   if (k === 'texto') { const r = S.sheet.res; const v = fd.get('v'); S.sheet = null; r && r(v); return; }
-  if (k === 'cfg') { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); if (num(fd.get('das')) !== S.cfg.das) S.cfg.dasRef = `informado em ${fmtDT(now())} por ${S.cfg.vendedor || '—'}`; S.cfg.das = num(fd.get('das')); S.cfg.comissaoPct = num(fd.get('comissaoPct')); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
+  if (k === 'cfg' && !fd.has('cfopBonif')) { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); await saveCfg(); S.view = 'home'; render(); toast('Salvo'); return; }
+  if (k === 'cfg') { const pn = (fd.get('pinNovo') || '').trim();
+    if (pn) { if (!/^\d{4,8}$/.test(pn) || pn !== (fd.get('pinConf') || '').trim()) { toast('PIN: 4 a 8 números, iguais nos dois campos', null, true); return; } S.cfg.pinHash = await hashPin(pn); Perfil.ate = Date.now() + 15 * 60e3; }
+    S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); if (num(fd.get('das')) !== S.cfg.das) S.cfg.dasRef = `informado em ${fmtDT(now())} por ${S.cfg.vendedor || '—'}`; S.cfg.das = num(fd.get('das')); S.cfg.comissaoPct = num(fd.get('comissaoPct')); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
     const urlAntes = S.cfg.sincUrl; S.cfg.sincUrl = (fd.get('sincUrl') || '').trim(); S.cfg.sincChave = (fd.get('sincChave') || '').trim(); await saveCfg();
     if (Sinc.ativo() && S.cfg.sincUrl !== urlAntes) { // servidor novo: sobe tudo o que existe neste aparelho
       S.lotes.forEach(l => Sinc.st.pend['lote:' + l.id] = ++Sinc.cont); S.vendas.forEach(v => Sinc.st.pend['venda:' + v.id] = ++Sinc.cont); S.movs.forEach(m => Sinc.st.pend['mov:' + m.id] = ++Sinc.cont);
@@ -1106,6 +1136,7 @@ document.addEventListener('submit', async ev => {
     const l = { id: uid(), pedido: fd.get('pedido').trim(), resp: fd.get('resp').trim(), equipe: fd.get('equipe').trim(), shows, showAtual: shows[0].id, carga: {}, retorno: {}, obsDif: {}, status: 'aberto', criado: now(), seq: 0 };
     S.lotes.push(l); await saveLote(l); S.loteId = l.id; S.view = 'lote'; S.tab = 'vender'; render();
   }
+  if (k === 'novoShow' && !gestor()) { if (!(await entrarGestor())) return; }
   if (k === 'novoShow') { const l = lote(); const sh = { id: uid(), cidade: fd.get('cidade').trim(), uf: fd.get('uf'), data: fd.get('data'), evento: fd.get('evento').trim() }; l.shows.push(sh); l.showAtual = sh.id; await saveLote(l); S.sheet = null; render(); toast(`Agora vendendo em ${sh.cidade}/${sh.uf}`); }
   if (k === 'mov') salvarMov(fd);
   if (k === 'despesa') { const l = lote(); const d = { id: uid(), cat: fd.get('cat'), showId: fd.get('showId') || '', tipo: fd.get('tipo'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: S.cfg.vendedor, ts: now() };
@@ -1117,7 +1148,10 @@ document.addEventListener('submit', async ev => {
     fin(l).f.ajustes.push(a); await saveLote(l); S.sheet = null; render(); toast('Justificativa lançada'); }
 });
 document.addEventListener('click', ev => {
-  const el = ev.target.closest('[data-a]'); if (el) { ev.preventDefault(); const fn = A[el.dataset.a]; fn && fn(el, ev); return; }
+  const el = ev.target.closest('[data-a]'); if (el) { ev.preventDefault(); const fn = A[el.dataset.a]; if (!fn) return;
+    if (S.cfg.pinHash && gestor()) Perfil.ate = Date.now() + 15 * 60e3; // atividade renova a sessão do gestor
+    if (precisaGestor(el) && !gestor()) { entrarGestor().then(ok => ok && fn(el, ev)); return; }
+    fn(el, ev); return; }
   if (ev.target.classList.contains('scrim')) A.fechar();
 });
 document.addEventListener('input', async ev => {
@@ -1137,6 +1171,7 @@ document.addEventListener('change', async ev => {
     if (t.dataset.in === 'outroValor') F.f.outros[+t.dataset.i].valor = num(t.value);
     await saveLote(l); render(); return; }
   const f = t.files && t.files[0]; if (!f) return;
+  if (!gestor()) { t.value = ''; toast('Importação é função do gestor', null, true); entrarGestor(); return; }
   try {
     if (t.dataset.in === 'catalogo') { const r = await importarCatalogo(f); toast(`${r.n} SKUs importados (${r.novos} novos)`); render(); }
     if (t.dataset.in === 'carga' && /\.pdf$/i.test(f.name)) { await lerCargaPdf(f, lote()); t.value = ''; return; }
