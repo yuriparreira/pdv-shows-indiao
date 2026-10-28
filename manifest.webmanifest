@@ -1,0 +1,12 @@
+{
+  "name": "PDV Shows · Indião Store",
+  "short_name": "PDV Shows",
+  "lang": "pt-BR",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#261915",
+  "theme_color": "#261915",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
