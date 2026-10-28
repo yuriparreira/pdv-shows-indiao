@@ -169,7 +169,7 @@ function atualizarSelo() { const el = document.querySelector('.net[data-v=config
 // ---------- estado ----------
 const S = {
   produtos: new Map(), lotes: [], vendas: [], movs: [], custos: {}, cfg: { vendedor: '', caixa: '', tema: 'dark', aparelho: '', cfopBonif: '5.910 / 6.910', cfopPerda: '5.927',
-    taxas: { debito: 1.37, c1: 3.14, c2: 5.38, c3: 6.12, c4: 6.86, c5: 7.60, c6: 8.34 }, das: 0, comissaoPct: 0 }, tabela: {},
+    taxas: { debito: 1.37, c1: 3.14, c2: 5.38, c3: 6.12, c4: 6.86, c5: 7.60, c6: 8.34 }, das: 0, comissaoPct: 0 }, tabela: {}, miniaturas: { skus: {} },
   view: 'home', loteId: null, tab: 'vender', busca: '', cat: '', todoCatalogo: false, esgotados: false,
   cart: [], cartDesc: 0, cartDescMotivo: '', pagamentos: [], sheet: null, contagemRevelada: false, infinite: null,
 };
@@ -483,7 +483,7 @@ function vNovo() {
   return topo('Novo lote', 'Um lote = um pedido de retirada no Tiny', true) + `<main><form data-f="novoLote">
   <label class="f">Nº do pedido no Tiny (cliente "Shows e Eventos")<input class="i" name="pedido" inputmode="numeric" placeholder="ex.: 4821"></label>
   <label class="f">Responsável pela carga<input class="i" name="resp" value="${esc(S.cfg.vendedor)}" required></label>
-  <label class="f">Equipe de venda<input class="i" name="equipe" placeholder="ex.: Jonathas, Luquinhas"></label>
+  <label class="f">Equipe de venda<input class="i" name="equipe" placeholder="ex.: nomes da equipe do show"></label>
   <div id="shows">${blocoShow(1, dataNoite())}</div>
   <p class="muted small">A data do show é a da noite em que ele começou. Show que começa depois da meia-noite usa a data da véspera.</p>
   <button type="button" class="btn block" data-a="maisShow" style="margin-bottom:12px">+ Adicionar outro show deste lote</button>
@@ -535,7 +535,8 @@ function vCatalogo() {
   <div class="card"><h2>Atualizar do Tiny</h2>
   <p class="muted small">No Tiny: Cadastros › Produtos › Exportar (planilha). O app lê SKU, descrição, variações, preço e a URL da foto. ${S.cfg.catalogoEm ? 'Última atualização: ' + fmtDT(S.cfg.catalogoEm) : ''}</p>
   <label class="btn primary block">Importar planilha do Tiny<input type="file" accept=".xls,.xlsx,.csv" class="hide" data-in="catalogo"></label>
-  <button class="btn block" style="margin-top:10px" data-a="baixarFotos">Guardar fotos para usar offline</button>
+  <p class="muted small" style="margin-top:10px">Fotos: ${Object.keys(S.miniaturas.skus || {}).length} SKUs com miniatura guardada no app (funcionam offline${S.miniaturas.gerado ? ', geradas em ' + fmtDT(S.miniaturas.gerado) : ''}). Foto nova ou trocada no Tiny entra rodando o script de miniaturas (fotos/ROTINA-FOTOS.md).</p>
+  <button class="btn block" data-a="baixarFotos">Guardar fotos do Tiny dos SKUs sem miniatura</button>
   <p class="muted small" id="fotosStatus"></p></div>
   <div class="card"><h2>Custos oficiais (modelagem)</h2>
   <p class="muted small">O CMV, a bonificação, a perda e a margem usam o custo da modelagem financeira (aba 12.1.Custos, base CPC 16). O custo do Tiny só vale para o SKU que não estiver no arquivo. Gerado por <b>custos/gerar_custos_oficiais.py</b>. ${Object.keys(S.custos).length ? `${Object.keys(S.custos).length} SKUs${S.custosInfo ? ' · ' + esc(S.custosInfo.arq) + ' · ' + fmtDT(S.custosInfo.em) : ''}.` : '<b>Nenhum arquivo importado: usando o custo do Tiny.</b>'}</p>
@@ -555,8 +556,8 @@ function agrupar(ps) {
   ps = ps.filter(p => !pais.has(p.sku)); // a linha do produto pai não é vendável; as variações são
   ps = ps.filter(p => !(/-fem$/i.test(p.sku) && S.produtos.has(skuFisico(p.sku)))); // -fem é o mesmo item do original
   const g = new Map();
-  ps.forEach(p => { const id = modeloDe(p); if (!g.has(id)) g.set(id, { id, nome: nomeModelo(p), img: '', cat: p.cat, preco: p.preco, precoShow: p.precoShow || 0, skus: [] }); const m = g.get(id); m.skus.push(p); if (!m.img && p.img) m.img = p.img; if (!m.cat && p.cat) m.cat = p.cat; });
-  g.forEach(m => { if (!m.img) m.img = S.produtos.get(m.id)?.img || ''; });
+  ps.forEach(p => { const id = modeloDe(p); if (!g.has(id)) g.set(id, { id, nome: nomeModelo(p), img: '', cat: p.cat, preco: p.preco, precoShow: p.precoShow || 0, skus: [] }); const m = g.get(id); m.skus.push(p); if (!m.img) m.img = fotoDe(p); if (!m.cat && p.cat) m.cat = p.cat; });
+  g.forEach(m => { if (!m.img) m.img = fotoDe(S.produtos.get(m.id)) || ''; });
   g.forEach(m => { if (m.skus.length < 2) { m.skus.forEach(p => p._rot = rotulo(p)); return; }
     const ws = m.skus.map(p => (p.descricao || '').split(/\s+/)); let k = 0;
     while (ws.every(w => w[k] !== undefined && w[k] === ws[0][k])) k++;
@@ -567,6 +568,8 @@ function agrupar(ps) {
 }
 // "Camiseta Algodão Pima com Elastano - Cabeça de Boi" -> ["Camiseta Algodão Pima...", "Cabeça de Boi"]
 const curto = n => { const i = n.indexOf(' - '); return i > 0 ? [n.slice(0, i), n.slice(i + 3)] : ['', n]; };
+// Miniatura que vai junto com o app (fotos/indice.json, gerado por fotos/gerar_miniaturas.py); sem ela, o link do Tiny.
+const fotoDe = p => { if (!p) return ''; const ix = S.miniaturas.skus || {}; const f = ix[p.sku] || ix[p.pai] || ix[skuFisico(p.sku)]; return f ? 'fotos/' + f : (p.img || ''); };
 const rotulo = p => [p.var?.Cor, p.var?.Tamanho].filter(Boolean).join(' · ') || p.sku;
 function vLote() {
   const l = lote(); if (!l) { S.view = 'home'; return vHome(); }
@@ -663,7 +666,7 @@ function tContagem(l) {
   <div class="row"><span class="grow">${contados} de ${skus.length} SKUs contados</span>${l.status === 'aberto' ? `<button class="btn" style="min-height:44px" data-a="iniciarContagem">Travar vendas</button>` : '<span class="pill contagem">vendas travadas</span>'}</div>
   ${l.status === 'contagem' ? `<button class="btn block" style="margin-top:10px;min-height:48px" data-a="destravar">Destravar vendas (zera a contagem)</button>` : ''}</div>
   ${mods.map(m => `<div class="card"><div class="row" style="margin-bottom:6px">${foto(m.img, 'thumb lg')}<h2 class="grow" style="margin:0">${esc(m.nome)}</h2></div>${m.skus.sort((a, b) => (a.var?.Cor || '').localeCompare(b.var?.Cor || '') || tamIdx(a.var?.Tamanho) - tamIdx(b.var?.Tamanho)).map(p => `<div class="line">
-    ${foto(p.img || m.img, 'thumb')}<div class="grow"><div style="font-weight:700">${esc([p.var?.Cor, p.var?.Tamanho].filter(Boolean).join(' · ') || p._rot || p.sku)}</div><div class="muted small">${esc(p.sku)}</div></div>
+    ${foto(fotoDe(p) || m.img, 'thumb')}<div class="grow"><div style="font-weight:700">${esc([p.var?.Cor, p.var?.Tamanho].filter(Boolean).join(' · ') || p._rot || p.sku)}</div><div class="muted small">${esc(p.sku)}</div></div>
     <div class="stepper"><button data-a="ret" data-s="${esc(p.sku)}" data-d="-1">−</button><input inputmode="numeric" data-in="ret" data-s="${esc(p.sku)}" value="${ret[p.sku] ?? ''}" placeholder="–"><button data-a="ret" data-s="${esc(p.sku)}" data-d="1">+</button></div></div>`).join('')}</div>`).join('')}
   <button class="btn primary block" data-a="revelar">Terminei: ver divergências</button>`;
 }
@@ -947,7 +950,7 @@ function shDespesa() {
   <label class="f">De qual show<select class="i" name="showId"><option value="">Todo o lote (rateio pela receita)</option>${(l.shows || []).map(s => `<option value="${s.id}" ${s.id === showAtual(l)?.id ? 'selected' : ''}>${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</option>`).join('')}</select></label>
   <div class="grid2"><label class="f">Forma<select class="i" name="tipo" data-in="despTipo"><option value="valor" ${!pct ? 'selected' : ''}>Valor (R$)</option><option value="pct" ${pct ? 'selected' : ''}>% sobre a venda</option></select></label>
   <label class="f">${pct ? 'Percentual' : 'Valor (R$)'}<input class="i" name="valor" inputmode="decimal" required value="${pct && S.cfg.comissaoPct ? String(S.cfg.comissaoPct).replace('.', ',') : ''}"></label></div>
-  <label class="f">Observação<input class="i" name="obs" placeholder="${cat === 'Comissão sobre vendas' ? 'ex.: Jonathas e Luquinhas' : 'ex.: 3 diárias × R$ 60'}"></label>
+  <label class="f">Observação<input class="i" name="obs" placeholder="${cat === 'Comissão sobre vendas' ? 'ex.: vendedores do show' : 'ex.: 3 diárias × R$ 60'}"></label>
   <button class="btn ok block">Lançar</button></form>`;
 }
 function shAjuste() {
@@ -1408,7 +1411,7 @@ function relatorioHTML(l) {
 
 // ---------- fotos offline, persistência, tela ligada ----------
 async function baixarFotos() {
-  const urls = [...new Set([...S.produtos.values()].map(p => p.img).filter(Boolean))]; const st = $('#fotosStatus');
+  const urls = [...new Set([...S.produtos.values()].map(p => fotoDe(p)).filter(u => /^https?:/.test(u)))]; const st = $('#fotosStatus');
   if (!navigator.onLine) { toast('Precisa de internet para guardar as fotos', null, true); return; }
   const c = await caches.open('pdv-fotos'); let ok = 0;
   for (const u of urls) { try { if (!(await c.match(u))) { const r = await fetch(u, { mode: 'no-cors' }); await c.put(u, r); } ok++; } catch (e) { } if (st) st.textContent = `${ok} de ${urls.length} fotos guardadas`; }
@@ -1430,6 +1433,7 @@ addEventListener('online', () => { render(); Sinc.ciclo(); }); addEventListener(
   await DB.open();
   const [ps, ls, vs, ms, meta] = await Promise.all(['produtos', 'lotes', 'vendas', 'movs', 'meta'].map(s => DB.all(s)));
   ps.forEach(p => S.produtos.set(p.sku, p)); S.lotes = ls; S.vendas = vs; S.movs = ms;
+  try { S.miniaturas = await (await fetch('fotos/indice.json')).json(); } catch (e) { S.miniaturas = { skus: {} }; }
   const cu = meta.find(m => m.k === 'custos'); if (cu) { S.custos = cu.v || {}; S.custosInfo = { em: cu.em, arq: cu.arq }; }
   const tb = meta.find(m => m.k === 'tabela'); if (tb) { S.tabela = tb.v || {}; S.tabelaInfo = { em: tb.em, arq: tb.arq }; }
   const cfg = meta.find(m => m.k === 'cfg'); if (cfg) S.cfg = { ...S.cfg, ...cfg.v, taxas: { ...S.cfg.taxas, ...(cfg.v.taxas || {}) } };
