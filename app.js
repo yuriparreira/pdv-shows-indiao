@@ -663,7 +663,7 @@ function baixasAjustadas(l) {
   const sd = saldos(l); const ret = l.retorno || {}; const F = fin(l);
   const itens = {}; Object.entries(sd).forEach(([s, x]) => { const dif = ret[s] === undefined ? 0 : ret[s] - x.saldo; itens[s] = { q: x.vendido, valor: x.valor, perda: dif < 0 ? -dif : 0, bonif: x.mov }; });
   let resto = F.ajVenda;
-  F.f.ajustes.filter(a => a.cat === 'venda_nr' && a.sku && a.qtd).forEach(a => { const it = itens[a.sku] ||= { q: 0, valor: 0, perda: 0, bonif: 0 };
+  F.f.ajustes.filter(a => a.cat === 'venda_nr' && a.sku && a.qtd && !l.perdaExportada).forEach(a => { const it = itens[a.sku] ||= { q: 0, valor: 0, perda: 0, bonif: 0 };
     const v = F.sinal(a); it.q += a.qtd; it.valor += v; it.perda = Math.max(0, it.perda - a.qtd); resto -= v; });
   const base = Object.values(itens).reduce((s, it) => s + (it.q ? it.valor : 0), 0);
   if (base && Math.abs(resto) > 0.001) Object.values(itens).forEach(it => { if (it.q) it.valor += resto * it.valor / base; });
@@ -713,7 +713,7 @@ function tRelatorio(l) {
   <div class="card" style="margin-top:12px"><h2>Arquivos para importar no Tiny</h2>
   <p class="muted small">No layout de importação de pedidos. Bonificação e perda vão em pedidos separados, valorizados a custo, para não mexer no preço médio da venda.</p>
   <button class="btn block" data-a="tinyCsv" data-t="venda">Pedido de venda (só o vendido)</button>
-  <div class="grid2" style="margin-top:10px"><button class="btn" data-a="tinyCsv" data-t="bonif">Bonificação<br><small>CFOP ${esc(S.cfg.cfopBonif)}</small></button><button class="btn" data-a="tinyCsv" data-t="perda">Perda<br><small>CFOP ${esc(S.cfg.cfopPerda)}</small></button></div></div>
+  <div class="grid2" style="margin-top:10px"><button class="btn" data-a="tinyCsv" data-t="bonif">Bonificação<br><small>CFOP ${esc(S.cfg.cfopBonif)}</small></button><button class="btn" data-a="tinyCsv" data-t="perda" ${l.status !== 'fechado' ? 'style="opacity:.5"' : ''}>Perda<br><small>CFOP ${esc(S.cfg.cfopPerda)}</small></button></div></div>
   <div class="grid2" style="margin-top:10px"><button class="btn" data-a="csvTiny">Planilha de conferência</button><button class="btn" data-a="exportarCaixa">Enviar caixa</button></div>
   <p class="muted small">"Enviar caixa" gera um arquivo com as vendas deste aparelho. No caixa principal, use "Receber caixa" na tela inicial para juntar.</p>`;
 }
@@ -809,7 +809,8 @@ function shAjuste() {
   <label class="f">Motivo<select class="i" name="cat" data-in="ajCat">${CATS_AJ.map(c => `<option value="${c.id}" ${c.id === cat.id ? 'selected' : ''}>${c.nome}</option>`).join('')}</select></label>
   ${cat.neutro ? '<p class="muted small">Só explica diferença entre formas (ex.: lançou Pix e foi débito). Não entra na soma.</p>' : `<label class="f">Efeito<select class="i" name="dir"><option value="mais" ${(cat.dir || (F.pendente >= 0 ? 'mais' : 'menos')) === 'mais' ? 'selected' : ''}>Entrou a mais que o lançado</option><option value="menos" ${(cat.dir || (F.pendente >= 0 ? 'mais' : 'menos')) === 'menos' ? 'selected' : ''}>Entrou a menos que o lançado</option></select></label>`}
   <label class="f">Valor (R$)<input class="i" name="valor" inputmode="decimal" required value="${Math.abs(F.pendente) >= .01 && !cat.neutro ? String(Math.abs(F.pendente).toFixed(2)).replace('.', ',') : ''}"></label>
-  ${cat.sku ? `<div class="grid2"><label class="f">Peça que faltou (opcional)<select class="i" name="sku"><option value="">—</option>${faltas.map(([s, q]) => `<option value="${esc(s)}">${esc(s)} (faltam ${q})</option>`).join('')}</select></label><label class="f">Quantidade<input class="i" name="qtd" inputmode="numeric" value="1"></label></div>
+  ${cat.sku && l.perdaExportada ? `<p class="small warn">A nota de perda já foi gerada em ${fmtDT(l.perdaExportada.ts)}: a peça continua na perda e o valor entra na venda por rateio.</p>` : ''}
+  ${cat.sku && !l.perdaExportada ? `<div class="grid2"><label class="f">Peça que faltou (opcional)<select class="i" name="sku"><option value="">—</option>${faltas.map(([s, q]) => `<option value="${esc(s)}">${esc(s)} (faltam ${q})</option>`).join('')}</select></label><label class="f">Quantidade<input class="i" name="qtd" inputmode="numeric" value="1"></label></div>
     <p class="muted small">Com a peça informada, ela sai da perda e entra no pedido de venda.</p>` : ''}
   <label class="f">Observação<input class="i" name="obs" placeholder="ex.: 2 bonés por R$ 200 no fim do show" ${cat.id === 'outro' ? 'required' : ''}></label>
   <button class="btn ok block">Lançar justificativa</button></form>`;
@@ -1103,7 +1104,8 @@ function csvTiny(l) {
 // Três arquivos no layout "importar pedidos" do Tiny: venda (só o vendido, preço médio real), bonificação e perda (a custo).
 const CAB_TINY = ['ID', 'Número do pedido', 'Data', 'Data prevista', 'ID contato', 'Nome do contato*', 'Tipo de Pessoa', 'CPF/CNPJ', 'RG/IE', 'CEP', 'Município', 'UF', 'Endereço', 'Endereço Nro', 'Complemento', 'Bairro', 'Fone', 'Celular', 'e-mail', 'Desconto pedido (% ou valor)', 'Frete', 'Observações', 'Situação', 'ID produto', 'Descrição', 'Quantidade', 'Valor unitário', 'Desconto item %', 'Código de rastreamento', 'Número da ordem de compra', 'Vendedor', 'Despesas', 'Desconto do pedido rateado', 'Frete pedido rateado', 'Despesas pedido rateado', 'Destinatário', 'CPF/CNPJ entrega', 'CEP entrega', 'Município entrega', 'UF entrega', 'Endereço entrega', 'Endereço Nro entrega', 'Complemento entrega', 'Bairro entrega', 'Fone entrega', 'Código (SKU)'];
 function csvTinyPedido(l, tipo) {
-  if (tipo !== 'bonif' && !fin(l).f.concluido) { toast('Conclua a conferência financeira antes de gerar a venda e a perda', null, true); S.tab = 'financeiro'; render(); return; }
+  if (tipo === 'perda' && l.status !== 'fechado') { toast('A perda sai depois da contagem física: feche o lote na aba Contagem', null, true); S.tab = 'contagem'; render(); return; }
+  if (tipo === 'venda' && !fin(l).f.concluido) { toast('Conclua a conferência financeira antes de gerar a venda', null, true); S.tab = 'financeiro'; render(); return; }
   const sd = saldos(l); const ret = l.retorno || {}; const c = l.contatoTiny || { nome: 'Shows e Eventos' }; const aj = baixasAjustadas(l);
   const br = v => (Math.round(v * 100) / 100).toFixed(2).replace('.', ',');
   const shows = (l.shows || []).map(s => `${s.cidade}/${s.uf} ${fmtD(s.data)}`).join('; ');
@@ -1126,6 +1128,7 @@ function csvTinyPedido(l, tipo) {
   if (!linhas.length) { toast(tipo === 'venda' ? 'Nenhuma venda no lote' : tipo === 'bonif' ? 'Nenhuma bonificação no lote' : 'Nenhuma perda na contagem'); return; }
   if (tipo !== 'venda' && linhas.some(r => r[CAB_TINY.indexOf('Valor unitário')] === '0,00')) toast('Há SKU sem custo no catálogo: valor zerado no arquivo', null, true);
   const q = c => /[",\n]/.test(String(c)) ? `"${String(c).replace(/"/g, '""')}"` : c;
+  if (tipo === 'perda' && !l.perdaExportada) { l.perdaExportada = { ts: now(), por: S.cfg.vendedor, pecas: linhas.reduce((a, r) => a + num(r[CAB_TINY.indexOf('Quantidade')]), 0) }; saveLote(l); }
   baixar(`tiny-${tipo}-${nomeArq(l)}.csv`, [CAB_TINY, ...linhas].map(r => r.map(q).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
 }
 function exportarCaixa(l) {
