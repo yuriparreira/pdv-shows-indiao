@@ -283,7 +283,7 @@ async function importarCarga(file, l) {
   }
   l.precos = {};
   for (const r of linhasArq) {
-    const sku = String(r[m.sku] || '').trim(); const q = num(r[m.ini]); if (!sku || q <= 0) continue;
+    const sku = skuFisico(String(r[m.sku] || '').trim()); const q = num(r[m.ini]); if (!sku || q <= 0) continue;
     carga[sku] = (carga[sku] || 0) + q; linhas++;
     if (m.vunit && num(r[m.vunit]) > 0) l.precos[sku] = num(r[m.vunit]);
     if (!S.produtos.has(sku)) {
@@ -331,7 +331,7 @@ function cargaDoTexto(t) {
         const fim = pos[i + c.length - 1] + 1; const resto = t.slice(fim, fim + 400);
         const m = resto.match(/(?:^|\s)(\d{1,5}(?:\.\d{3})*,\d{2,4})(?=\s|$)/);
         const q = m ? Math.round(num(m[1])) : 0;
-        if (q > 0) { carga[sku] = (carga[sku] || 0) + q; achados.push({ sku, q }); }
+        if (q > 0) { carga[skuFisico(sku)] = (carga[skuFisico(sku)] || 0) + q; achados.push({ sku, q }); }
       }
       i = comp.indexOf(c, i + 1);
     }
@@ -360,8 +360,20 @@ const precoShow = p => fontePreco(p)[1];
 // SKU -fem sem custo próprio usa o da versão masculina (política da aba 00.5).
 // alíquota efetiva do Simples (Anexo I, 3ª faixa) da modelagem v9.7, aba 15.Tributario: set/26 realizado 7,10%; out/26 projetado 7,02%
 const DAS_MODELAGEM = { pct: 7.02, ref: 'out/26', fonte: 'modelagem v9.7 · 15.Tributario' };
+// SKU "-fem" é variação comercial do site: no Tiny é um kit de 1 unidade do original (mesmo estoque, mesmo custo).
+// No app ele vira sempre o SKU físico original, na carga, na venda, na bonificação, na contagem e no custo.
+// Quando a cor vem abreviada (CIXW4-Azul-M-fem x CIXW4-Azul Indigo-M), acha o original do mesmo modelo e tamanho cuja cor começa igual.
+function skuFisico(sku) {
+  sku = String(sku || ''); if (!/-fem$/i.test(sku)) return sku;
+  const base = sku.replace(/-fem$/i, ''); if (S.produtos.has(base) || S.custos[base]) return base;
+  const pt = base.split('-'); if (pt.length < 3) return base;
+  const modelo = pt[0], tam = pt[pt.length - 1], cor = pt.slice(1, -1).join('-').toLowerCase();
+  const cand = [...new Set([...S.produtos.keys(), ...Object.keys(S.custos)])].filter(x => !/-fem$/i.test(x) && x.split('-')[0] === modelo && x.split('-').pop() === tam && x.split('-').slice(1, -1).join('-').toLowerCase().startsWith(cor));
+  return cand.length === 1 ? cand[0] : base;
+}
 function custoDe(sku) {
-  return S.custos[sku]?.c || (sku.endsWith('-fem') && S.custos[sku.slice(0, -4)]?.c) || S.produtos.get(sku)?.custo || 0;
+  if (/-fem$/i.test(sku)) return custoDe(skuFisico(sku));
+  return S.custos[sku]?.c || S.produtos.get(sku)?.custo || 0;
 }
 async function importarCustos(file) {
   const abas = await lerPlanilha(file); const t = {}; let n = 0;
@@ -510,6 +522,7 @@ function vCatalogo() {
 function agrupar(ps) {
   const pais = new Set([...S.produtos.values()].map(p => p.pai).filter(Boolean));
   ps = ps.filter(p => !pais.has(p.sku)); // a linha do produto pai não é vendável; as variações são
+  ps = ps.filter(p => !(/-fem$/i.test(p.sku) && S.produtos.has(skuFisico(p.sku)))); // -fem é o mesmo item do original
   const g = new Map();
   ps.forEach(p => { const id = modeloDe(p); if (!g.has(id)) g.set(id, { id, nome: nomeModelo(p), img: '', cat: p.cat, preco: p.preco, precoShow: p.precoShow || 0, skus: [] }); const m = g.get(id); m.skus.push(p); if (!m.img && p.img) m.img = p.img; if (!m.cat && p.cat) m.cat = p.cat; });
   g.forEach(m => { if (!m.img) m.img = S.produtos.get(m.id)?.img || ''; });
@@ -951,7 +964,7 @@ const A = {
   abrirModelo: e => { S.sheet = { k: 'modelo', m: e.dataset.m, modo: 'venda' }; renderSheet(); },
   fechar: () => { if (S.sheet?.res) S.sheet.res(null); S.sheet = null; render(); },
   add: async e => {
-    const sku = e.dataset.s; const p = S.produtos.get(sku); const l = lote(); const sd = saldos(l);
+    const sku = skuFisico(e.dataset.s); const p = S.produtos.get(sku) || S.produtos.get(e.dataset.s); const l = lote(); const sd = saldos(l);
     const noCart = S.cart.filter(c => c.sku === sku).reduce((a, c) => a + c.qtd, 0);
     if ((sd[sku]?.saldo || 0) - noCart <= 0) {
       const ok = await perguntar({ titulo: 'Sem saldo na carga', texto: `${p.descricao}: a carga deste lote não tem mais essa peça. Se ela está na sua mão, confira o SKU. Vender mesmo assim?`, ok: 'Vender mesmo assim', ph: 'motivo (obrigatório)', obrig: true, perigo: true });
@@ -1006,7 +1019,7 @@ const A = {
   usarShow: async e => { const l = lote(); l.showAtual = e.dataset.id; await saveLote(l); S.sheet = null; render(); toast('Show atual trocado'); },
   novoMov: e => { S.sheet = { k: 'mov', tipo: e.dataset.t }; renderSheet(); },
   movModelo: e => { S.sheet = { k: 'modelo', m: e.dataset.m, modo: 'mov', tipo: S.sheet.tipo }; renderSheet(); },
-  pickMov: e => { S.sheet = { k: 'mov', tipo: S.sheet.tipo, sku: e.dataset.s }; renderSheet(); },
+  pickMov: e => { S.sheet = { k: 'mov', tipo: S.sheet.tipo, sku: skuFisico(e.dataset.s) }; renderSheet(); },
   movQtd: e => { const i = $('#sheet input[name=qtd]'); i.value = Math.max(1, num(i.value) + +e.dataset.d); },
   cancelarMov: async e => { const m = S.movs.find(x => x.id === e.dataset.id); const r = await perguntar({ titulo: 'Cancelar lançamento?', ph: 'motivo', obrig: true, ok: 'Cancelar', perigo: true }); S.sheet = null; if (!r) return render(); m.status = 'cancelada'; m.motivoCanc = r; await DB.put('movs', m); render(); },
   chipTexto: e => { const i = $('#sheet input[name=v]'); i.value = e.dataset.v; },
