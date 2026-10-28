@@ -152,38 +152,58 @@ table.t td,table.t th{white-space:nowrap}
 #print{display:none}
 @media print{
   @page{size:A4;margin:12mm}
-  body{background:#fff;color:#111}
-  #app,.scrim,.toast{display:none!important}
-  #print{display:block;font:10.5pt/1.35 "Familjen Grotesk",system-ui,Arial,sans-serif;color:#261915}
-  #print h1{font-size:18pt;margin:0}
-  #print h2{font-family:"Jockey One",sans-serif;font-weight:400;font-size:13pt;margin:14px 0 6px;color:#261915;border-bottom:2px solid #BD5535;padding-bottom:3px}
+  /* o relatório sai sempre claro, mesmo com o app no tema escuro */
+  :root,:root[data-theme]{color-scheme:light;--bg:#fff;--surface:#fff;--surface2:#EFE8E5;--line:#D1C9C9;--text:#261915;--muted:#6E5B53}
+  html,body{background:#fff!important;color:#261915!important;height:auto!important}
+  #app,.scrim,.toast,#sheet{display:none!important}
+  #print{display:block;font:10pt/1.35 "Familjen Grotesk",system-ui,Arial,sans-serif;color:#261915;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  #print *{color:inherit;background-color:transparent}
+  #print h2{font-family:"Jockey One",sans-serif;font-weight:400;font-size:13pt;margin:14px 0 6px;color:#261915;border-bottom:2px solid #BD5535;padding-bottom:3px;page-break-after:avoid}
   #print .hdr{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #261915;padding-bottom:8px}
   #print .hdr img{height:46px}
   #print .tit{font-family:"Jockey One",sans-serif;font-size:15pt;color:#BD5535}
-  #print .brand{font-weight:900;font-size:20pt;letter-spacing:1px}
-  #print .brand span{color:#BD5535}
-  #print table{width:100%;border-collapse:collapse;font-size:9.5pt;page-break-inside:auto}
+  #print .sec{margin:14px 0 8px;padding:6px 10px;background-color:#261915;color:#F8F4F3;font-family:"Jockey One",sans-serif;font-size:14pt;letter-spacing:.5px;border-radius:4px}
+  #print .sec.quebra{page-break-before:always}
+  #print table{width:100%;border-collapse:collapse;font-size:9pt;page-break-inside:auto;margin:4px 0}
   #print tr{page-break-inside:avoid}
-  #print th,#print td{border-bottom:1px solid #ccc;padding:4px 5px;text-align:right}
+  #print th,#print td{border-bottom:1px solid #D1C9C9;padding:3px 5px;text-align:right;color:#261915}
   #print th:first-child,#print td:first-child,#print td.l,#print th.l{text-align:left}
-  #print th{background:#EFE8E5}
-  #print .obs{font-size:8.5pt;color:#6E5B53}
-  #print .k{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
-  #print .k div{border:1px solid #ccc;border-radius:6px;padding:6px}
-  #print .k b{display:block;font-size:13pt}
-  #print .shows{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-  #print .shows .s{border:1px solid #D1C9C9;border-left:6px solid #BD5535;border-radius:6px;padding:8px 10px;page-break-inside:avoid}
-  #print .shows .s.lider{background:#F8F4F3}
-  #print .shows .c{font-family:"Jockey One",sans-serif;font-size:13pt;line-height:1.1}
-  #print .shows .d{font-size:8.5pt;color:#6E5B53}
-  #print .shows .v{font-family:"Jockey One",sans-serif;font-size:20pt;color:#BD5535;line-height:1.15;margin-top:4px}
-  #print .shows .bar{height:6px;background:#EFE8E5;border-radius:3px;margin:4px 0}
-  #print .shows .bar i{display:block;height:100%;background:#261915;border-radius:3px}
-  #print .shows .m{display:flex;justify-content:space-between;gap:6px;font-size:9pt}
-  #print .neg{color:#B3261E}
+  #print th{background-color:#EFE8E5;font-weight:700}
+  #print .k{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px}
+  #print .k div{border:1px solid #D1C9C9;border-radius:6px;padding:6px 8px;font-size:8.5pt;color:#6E5B53}
+  #print .k b{display:block;font-size:13pt;color:#261915}
+  #print .k .hl{border:2px solid #BD5535;background-color:#F8F4F3}
+  #print .k .hl b{color:#BD5535;font-size:15pt}
+  #print table.lote td{font-size:8.5pt;padding:2px 5px}
+  #print .sc{border:1px solid #D1C9C9;border-left:6px solid #BD5535;border-radius:6px;padding:8px 10px;margin:0 0 10px;page-break-inside:avoid}
+  #print .sc.prej{border-left-color:#B3261E}
+  #print .sc .ch{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #D1C9C9;padding-bottom:6px;margin-bottom:6px}
+  #print .sc .c{font-family:"Jockey One",sans-serif;font-size:14pt;line-height:1.1}
+  #print .sc .d{font-size:8.5pt;color:#6E5B53}
+  #print .sc .res{text-align:right;background-color:#261915;color:#F8F4F3;border-radius:6px;padding:4px 10px}
+  #print .sc .res span,#print .sc .res small{display:block;font-size:7.5pt;color:#D1C9C9}
+  #print .sc .res b{display:block;font-family:"Jockey One",sans-serif;font-size:17pt;line-height:1.1;color:#F8F4F3}
+  #print .sc .res b.neg{color:#FF8A80}
+  #print .sc .cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  #print .sc .lbl{font-size:8pt;text-transform:uppercase;letter-spacing:.5px;color:#6E5B53}
+  #print .sc .v{font-family:"Jockey One",sans-serif;font-size:20pt;color:#BD5535;line-height:1.1}
+  #print .sc .m{font-size:8.5pt;margin:2px 0 4px}
+  #print table.mini{font-size:8.5pt}
+  #print table.mini td,#print table.mini th{padding:2px 4px}
+  #print table.mini tr.tot td{font-weight:700;border-top:1.5px solid #261915}
+  #print table.just td{font-size:8pt}
+  #print table.dre tr.rec td{font-weight:700}
+  #print table.dre tr.mc td{font-weight:800;font-size:10pt;background-color:#F8F4F3;border-top:2px solid #261915;border-bottom:2px solid #261915}
+  #print table.dre td.pc{color:#6E5B53;width:52px}
+  #print .checks{font-size:8pt;margin-top:3px}
+  #print .checks span{display:block}
+  #print .checks .ok{color:#2F6F3D}
+  #print table.itens td{font-size:8pt}
+  #print .small{font-size:8pt;color:#6E5B53}
+  #print .neg{color:#B3261E!important;font-weight:700}
   #print .sign{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:40px}
-  #print .sign div{border-top:1px solid #111;padding-top:4px;text-align:center}
-  #print .foot{margin-top:14px;font-size:8.5pt;color:#555}
+  #print .sign div{border-top:1px solid #261915;padding-top:4px;text-align:center}
+  #print .foot{margin-top:6px;font-size:8pt;color:#6E5B53}
 }
 </style>
 </head>

@@ -1348,88 +1348,118 @@ async function receberCaixa(file) {
 }
 
 // ---------- relatório PDF ----------
+// Relatório em duas partes: 1) resultado comercial (sócios: Gabriel e Yuri); 2) conciliação e baixas no ERP (Yuri)
 function relatorioHTML(l) {
   const r = resumo(l); const sd = saldos(l); const ret = l.retorno || {}; const fech = l.status === 'fechado'; const obs = l.obsDif || {};
   const linhas = Object.entries(sd).filter(([, x]) => x.carga || x.vendido || x.mov).map(([s, x]) => {
     const dif = ret[s] === undefined ? null : ret[s] - x.saldo;
     return { s, p: S.produtos.get(s) || { descricao: s }, ...x, ret: ret[s], dif, perda: dif < 0 ? -dif : 0, sobra: dif > 0 ? dif : 0 };
   }).sort((a, b) => (a.dif || 0) - (b.dif || 0) || (b.vendido + b.mov) - (a.vendido + a.mov) || a.s.localeCompare(b.s)); // divergências e movimentados primeiro
-  const movs = movsLote(l); const inf = l.conferenciaInfinite;
+  const movs = movsLote(l); const inf = l.conferenciaInfinite; const F = fin(l); const M = margem(l); const a = analiseInfinite(l);
   const semSaldo = vendasLote(l).flatMap(v => v.itens.filter(i => i.semSaldo).map(i => ({ ...i, num: v.num, motivo: i.semSaldo })));
   const descs = vendasLote(l).filter(v => v.desconto);
-  const soma = (arr, f) => arr.reduce((a, x) => a + f(x), 0);
+  const soma = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
   const custo = x => custoDe(x.s);
   const vendidos = linhas.filter(x => x.vendido), bonif = linhas.filter(x => x.mov), perdas = linhas.filter(x => x.perda), sobras = linhas.filter(x => x.sobra);
   const dev = linhas.filter(x => x.ret);
-  return `<div class="hdr"><div><img src="marca/logo-positivo.svg" alt="Indião Store"><div class="tit">Relatório de vendas em show · ${fech ? 'FINAL' : 'PARCIAL'}</div></div>
-  <div style="text-align:right"><b>Pedido Tiny: ${esc(l.pedido || '—')}</b><br>Emitido em ${new Date().toLocaleString('pt-BR')}${fech ? '' : '<br><b>Lote ainda não fechado</b>'}</div></div>
-  <h2>Lote</h2><table><tr><td class="l">Shows</td><td class="l">${(l.shows || []).map(s => `${esc(s.cidade)}/${s.uf} (${fmtD(s.data)}${s.evento ? ', ' + esc(s.evento) : ''})`).join('; ')}</td></tr>
-  <tr><td class="l">Responsável / equipe</td><td class="l">${esc(l.resp)}${l.equipe ? ' · ' + esc(l.equipe) : ''}</td></tr>
-  <tr><td class="l">Carga</td><td class="l">${Object.values(l.carga || {}).reduce((a, b) => a + b, 0)} peças · ${esc(l.cargaArquivo || (l.cargaManual ? 'contada no app' : '—'))}${l.cargaPor ? ' · importada por ' + esc(l.cargaPor) : ''}</td></tr>
-  ${fech ? `<tr><td class="l">Fechamento</td><td class="l">${fmtDT(l.fechadoEm)} · conferido por ${esc(l.fechadoPor)}</td></tr>` : ''}
-  ${(l.historico || []).map(h => `<tr><td class="l">${h.acao === 'destravou vendas' || !h.acao ? 'Contagem destravada' : esc(titulo(h.acao))}</td><td class="l">${fmtDT(h.ts)} · ${esc(h.quem)} · ${esc(h.motivo)}${h.contadosApagados ? ` · ${h.contadosApagados} SKUs de contagem apagados` : ''}</td></tr>`).join('')}</table>
-  <h2>Resumo</h2><div class="k"><div><b>${brl(r.liq)}</b>vendas líquidas</div><div><b>${r.n}</b>vendas (${r.canc} canceladas)</div><div><b>${r.pecas}</b>peças vendidas</div><div><b>${brl(r.ticket)}</b>ticket médio</div></div>
-  <p>Bruto ${brl(r.bruto)} · descontos ${brl(r.desc)} · bonificações ${soma(bonif, x => x.mov)} peças · perdas na contagem ${soma(perdas, x => x.perda)} peças · sobras ${soma(sobras, x => x.sobra)} peças</p>
-  ${(() => { const sh = l.shows || []; if (!sh.length) return '';
-    // vendas lançadas no PDV por show (a conferência financeira ajusta o lote, não cada show)
-    const xs = sh.map(s => ({ s, x: resumo(l, s.id), bon: movs.filter(m => m.showId === s.id).reduce((a, m) => a + m.qtd, 0) }));
-    const top = Math.max(...xs.map(o => o.x.liq));
-    return `<h2>Vendas por show</h2><div class="shows">${xs.map(({ s, x, bon }) => { const pct = r.liq ? x.liq / r.liq * 100 : 0;
-      return `<div class="s${xs.length > 1 && x.liq === top && top > 0 ? ' lider' : ''}"><div class="c">${esc(s.cidade)}/${s.uf}</div><div class="d">${fmtD(s.data)}${s.evento ? ' · ' + esc(s.evento) : ''}</div>
-      <div class="v">${brl(x.liq)}</div><div class="bar"><i style="width:${Math.min(100, pct).toFixed(1)}%"></i></div>
-      <div class="m"><span><b>${pct.toFixed(0)}%</b> do lote</span><span><b>${x.n}</b> vendas</span><span><b>${x.pecas}</b> peças</span><span>ticket <b>${brl(x.ticket)}</b></span>${bon ? `<span><b>${bon}</b> bonif.</span>` : ''}</div></div>`; }).join('')}</div>`; })()}
+  const pct = (v, base) => (base ? v / base * 100 : 0).toFixed(1).replace('.', ',') + '%';
+  const shows = l.shows || []; const showsPorId = Object.fromEntries(shows.map(s => [s.id, s]));
+  const FORMAS_REC = [['pix', 'Pix'], ['credito', 'Crédito'], ['debito', 'Débito'], ['dinheiro', 'Dinheiro']];
 
+  // faturado (PDV) x recebido de verdade, por forma, com cada diferença justificada
+  const difs = FORMAS_REC.map(([k, n]) => ({ k, n, pdv: F.r.formas[k] || 0, rec: F.real[k] })).filter(x => x.pdv || x.rec);
+  const difInf = difs.filter(x => x.rec !== null).map(x => x.rec - x.pdv);
+  const outrosRec = F.f.outros.reduce((s, o) => s + (o.valor || 0), 0); const outroPdv = F.r.formas.outro || 0;
+  const todasDifs = [...difInf, ...(outrosRec || outroPdv ? [outrosRec - outroPdv] : [])];
+  const entreFormas = (todasDifs.reduce((s, d) => s + Math.abs(d), 0) - Math.abs(todasDifs.reduce((s, d) => s + d, 0))) / 2;
+  const formaJust = F.f.ajustes.filter(x => x.cat === 'forma').reduce((s, x) => s + (x.valor || 0), 0);
+  const entreFormasSemJust = +(entreFormas - formaJust).toFixed(2);
+  const blocoRecebimento = () => `<table class="mini"><thead><tr><th class="l">Recebimento</th><th>Faturado</th><th>Recebido</th><th>Diferença</th></tr></thead><tbody>
+    ${difs.map(x => { const d = x.rec === null ? null : x.rec - x.pdv; return `<tr><td class="l">${x.n}</td><td>${brl(x.pdv)}</td><td>${x.rec === null ? '<span class="neg">não informado</span>' : brl(x.rec)}</td><td class="${d && Math.abs(d) >= .01 ? 'neg' : ''}">${d === null ? '—' : brl(d)}</td></tr>`; }).join('')}
+    ${outrosRec || outroPdv ? `<tr><td class="l">Outros meios${F.f.outros.length ? ' (' + F.f.outros.map(o => esc(o.nome || '?')).join(', ') + ')' : ''}</td><td>${brl(outroPdv)}</td><td>${brl(outrosRec)}</td><td class="${Math.abs(outrosRec - outroPdv) >= .01 ? 'neg' : ''}">${brl(outrosRec - outroPdv)}</td></tr>` : ''}
+    <tr class="tot"><td class="l">Total</td><td>${brl(F.r.liq)}</td><td>${brl(F.realTotal)}</td><td class="${Math.abs(F.dif) >= .01 ? 'neg' : ''}">${brl(F.dif)}</td></tr></tbody></table>
+    ${F.f.ajustes.length ? `<table class="mini just"><thead><tr><th class="l">Justificativa da diferença</th><th>Valor</th><th class="l">Efeito</th></tr></thead><tbody>
+    ${F.f.ajustes.map(x => { const c = CAT_AJ[x.cat] || {}; return `<tr><td class="l"><b>${esc(c.nome || x.cat)}</b>${x.sku ? ' · ' + esc(x.sku) + ' (' + x.qtd + ' pç)' : ''}${x.obs ? ' · ' + esc(x.obs) : ''}${x.quem ? ' · ' + esc(x.quem) : ''}</td><td>${c.neutro ? '' : x.dir === 'menos' ? '−' : '+'}${brl(x.valor)}</td><td class="l">${c.neutro ? 'só entre formas' : c.venda ? 'muda a venda' : 'sai da margem'}</td></tr>`; }).join('')}</tbody></table>` : ''}
+    <div class="checks"><span class="${Math.abs(F.pendente) < .01 ? 'ok' : 'neg'}">Diferença total sem justificativa: <b>${brl(F.pendente)}</b></span>
+    ${entreFormasSemJust >= .01 ? `<span class="neg">Diferença entre formas compensada (${brl(entreFormasSemJust)}) sem justificativa "forma de pagamento trocada"</span>` : ''}
+    ${F.faltaInformar.length ? `<span class="neg">Falta informar o recebido: ${F.faltaInformar.join(', ')}</span>` : ''}</div>`;
+
+  // DRE de cada show (margem de contribuição), com o faturamento do show em destaque
+  const linhaDRE = (c, k, nome, sinal = '−') => `<tr><td class="l">${sinal ? '(' + sinal + ') ' : ''}${nome}</td><td>${brl(c[k])}</td><td class="pc">${pct(c[k], c.rec)}</td></tr>`;
+  const dre = c => `<table class="mini dre"><tbody>
+    <tr class="rec"><td class="l">Receita líquida</td><td>${brl(c.rec)}</td><td class="pc">100%</td></tr>
+    ${linhaDRE(c, 'das', `DAS ${String(S.cfg.das || 0).replace('.', ',')}%`)}${linhaDRE(c, 'taxa', 'Taxas de cartão')}${linhaDRE(c, 'cmv', 'CMV (custo das peças)')}
+    ${linhaDRE(c, 'bonif', 'Bonificações a custo')}${linhaDRE(c, 'perda', 'Perdas da contagem')}${linhaDRE(c, 'desp', 'Despesas do show')}${linhaDRE(c, 'quebra', 'Quebra de caixa e ajustes')}
+    <tr class="mc"><td class="l">= Resultado do show (margem de contribuição)</td><td>${brl(c.mc)}</td><td class="pc">${pct(c.mc, c.rec)}</td></tr></tbody></table>`;
+  const cardShow = (c, comRecebimento) => { const s = showsPorId[c.id]; const x = s ? resumo(l, s.id) : r; const bon = s ? movs.filter(m => m.showId === s.id).reduce((q, m) => q + m.qtd, 0) : soma(bonif, y => y.mov);
+    const ajusteVenda = c.rec - x.liq;
+    return `<div class="sc${c.mc < 0 ? ' prej' : ''}"><div class="ch"><div><div class="c">${s ? esc(s.cidade) + '/' + s.uf : 'Total do lote'}</div><div class="d">${s ? fmtD(s.data) + (s.evento ? ' · ' + esc(s.evento) : '') : shows.length + ' shows'}</div></div>
+      <div class="res"><span>Resultado</span><b class="${c.mc < 0 ? 'neg' : ''}">${brl(c.mc)}</b><small>${pct(c.mc, c.rec)} da receita</small></div></div>
+      <div class="cols"><div class="fat"><span class="lbl">Faturamento</span><div class="v">${brl(c.rec)}</div>
+        <div class="m"><b>${x.n}</b> vendas · <b>${x.pecas}</b> peças · ticket <b>${brl(x.ticket)}</b>${bon ? ` · <b>${bon}</b> bonif.` : ''}${x.desc ? ` · descontos <b>${brl(x.desc)}</b>` : ''}</div>
+        ${Math.abs(ajusteVenda) >= .01 ? `<div class="m">PDV ${brl(x.liq)} ${ajusteVenda > 0 ? '+' : '−'} ${brl(Math.abs(ajusteVenda))} da conferência financeira</div>` : ''}
+        ${comRecebimento ? blocoRecebimento() : `<table class="mini"><tbody>${FORMAS.filter(f => x.formas[f.id]).map(f => `<tr><td class="l">${f.nome}</td><td>${brl(x.formas[f.id])}</td></tr>`).join('')}</tbody></table>`}</div>
+      <div>${dre(c)}</div></div></div>`; };
+  const cards = shows.length > 1 ? [...M.cols.map(c => cardShow(c, false)), cardShow({ ...M.tot, id: null }, true)] : M.cols.map(c => cardShow(c, true));
+
+  return `<div class="hdr"><div><img src="marca/logo-positivo.svg" alt="Indião Store"><div class="tit">Relatório de vendas em show · ${fech ? 'FINAL' : 'PARCIAL'}</div></div>
+  <div style="text-align:right"><b>Pedido Tiny: ${esc(l.pedido || '—')}</b><br>Emitido em ${new Date().toLocaleString('pt-BR')}${fech ? '' : '<br><b class="neg">Lote ainda não fechado</b>'}${F.f.concluido ? '' : '<br><b class="neg">Conferência financeira não concluída</b>'}</div></div>
+  <div class="sec">1 · Resultado comercial</div>
+  <div class="k"><div><b>${brl(M.tot.rec)}</b>faturamento${M.conf ? ' conferido' : ' (PDV)'}</div><div><b>${F.f.concluido || !F.faltaInformar.length ? brl(F.realTotal) : '—'}</b>recebido de fato</div>
+    <div class="hl"><b class="${M.tot.mc < 0 ? 'neg' : ''}">${brl(M.tot.mc)}</b>resultado do lote (${pct(M.tot.mc, M.tot.rec)})</div><div><b>${r.pecas} pç · ${brl(r.ticket)}</b>peças vendidas · ticket médio</div></div>
+  <table class="lote"><tr><td class="l">Shows</td><td class="l">${shows.map(s => `${esc(s.cidade)}/${s.uf} (${fmtD(s.data)}${s.evento ? ', ' + esc(s.evento) : ''})`).join('; ')}</td></tr>
+  <tr><td class="l">Responsável / equipe</td><td class="l">${esc(l.resp)}${l.equipe ? ' · ' + esc(l.equipe) : ''}</td></tr>
+  <tr><td class="l">Carga</td><td class="l">${Object.values(l.carga || {}).reduce((s, v) => s + v, 0)} peças · vendidas ${r.pecas} · bonificadas ${soma(bonif, x => x.mov)} · perdas ${soma(perdas, x => x.perda)} · sobras ${soma(sobras, x => x.sobra)} · retorno ${soma(dev, x => x.ret)}</td></tr></table>
+
+  <h2>Faturamento e resultado por show</h2>${cards.join('')}
+  <p class="foot">Receita conferida (PDV + ajustes da conferência financeira que mudam a venda). DAS sobre a receita · taxas ${M.taxaReal ? 'reais do extrato InfinitePay' : 'estimadas'} · CMV, bonificações e perdas pelo custo oficial${M.semCusto.length ? ` (<span class="neg">${M.semCusto.length} SKUs sem custo: CMV subestimado</span>)` : ''} · despesas do lote rateadas pela receita · quebra de caixa não muda a venda nem o DAS, mas sai do resultado.${M.conf ? '' : ' <span class="neg">Prévia: conferência financeira não concluída.</span>'}</p>
+  ${(l.despesas || []).length ? `<h2>Despesas do show</h2><table><thead><tr><th class="l">Despesa</th><th class="l">Show</th><th class="l">Obs.</th><th class="l">Lançou</th><th>Valor</th></tr></thead><tbody>${l.despesas.map(d => `<tr><td class="l">${esc(d.cat)}</td><td class="l">${d.showId ? esc(showsPorId[d.showId]?.cidade || '') : 'Todo o lote'}</td><td class="l">${esc(d.obs || '')}</td><td class="l">${esc(d.quem || '')}</td><td>${d.tipo === 'pct' ? String(d.valor).replace('.', ',') + '% da venda' : brl(d.valor)}</td></tr>`).join('')}
+    <tr><th class="l" colspan="4">Total</th><th>${brl(M.tot.desp)}</th></tr></tbody></table>` : ''}
+  ${movs.length ? `<h2>Bonificações (CFOP ${esc(S.cfg.cfopBonif)})</h2><table><thead><tr><th class="l">Data</th><th class="l">Tipo</th><th class="l">SKU</th><th>Qtd</th><th>Custo</th><th class="l">Autorizou</th><th class="l">Lançou</th><th class="l">Obs.</th></tr></thead><tbody>
+  ${movs.map(m => `<tr><td class="l">${fmtDT(m.ts)}</td><td class="l">${esc(MOV[m.tipo] || m.tipo)}</td><td class="l">${esc(m.sku)}</td><td>${m.qtd}</td><td>${brl(custoDe(m.sku) * m.qtd)}</td><td class="l">${esc(m.autorizou)}</td><td class="l">${esc(m.quem)}</td><td class="l">${esc(m.obs)}</td></tr>`).join('')}</tbody></table>` : ''}
+  ${descs.length || semSaldo.length ? `<h2>Descontos e exceções</h2><table><tbody>${descs.map(v => `<tr><td class="l">Venda #${v.num}</td><td class="l">Desconto ${brl(v.desconto)} · ${esc(v.descMotivo)} · ${esc(v.vendedor)}</td></tr>`).join('')}${semSaldo.map(i => `<tr><td class="l">Venda #${i.num}</td><td class="l">${esc(i.sku)} vendido sem saldo na carga · ${esc(i.motivo)}</td></tr>`).join('')}
+    ${descs.length ? `<tr><th class="l">Total de descontos</th><th class="l">${brl(soma(descs, v => v.desconto))} (${pct(soma(descs, v => v.desconto), r.bruto)} do bruto)</th></tr>` : ''}</tbody></table>` : ''}
+
+  <div class="sec quebra">2 · Conciliação e baixas no ERP</div>
   <h2>Baixas no Tiny (documentos separados)</h2>
   <table><thead><tr><th class="l">Documento</th><th class="l">CFOP</th><th>Peças</th><th>Valor</th><th class="l">Base do valor</th></tr></thead><tbody>
-  ${(() => { const F = fin(l); const aj = Object.values(baixasAjustadas(l)); return F.f.concluido
-    ? `<tr><td class="l">Pedido de venda (só o vendido)</td><td class="l">do pedido</td><td>${aj.reduce((a, it) => a + it.q, 0)}</td><td>${brl(aj.reduce((a, it) => a + (it.q ? it.valor : 0), 0))}</td><td class="l">conferência financeira</td></tr>`
+  ${(() => { const aj = Object.values(baixasAjustadas(l)); return F.f.concluido
+    ? `<tr><td class="l">Pedido de venda (só o vendido)</td><td class="l">do pedido</td><td>${aj.reduce((s, it) => s + it.q, 0)}</td><td>${brl(aj.reduce((s, it) => s + (it.q ? it.valor : 0), 0))}</td><td class="l">conferência financeira</td></tr>`
     : `<tr><td class="l">Pedido de venda (só o vendido)</td><td class="l">do pedido</td><td>${soma(vendidos, x => x.vendido)}</td><td>${brl(soma(vendidos, x => x.valor))}</td><td class="l neg">PDV, sem conferência financeira</td></tr>`; })()}
-  <tr><td class="l">Nota de bonificação</td><td class="l">${esc(S.cfg.cfopBonif)}</td><td>${soma(bonif, x => x.mov)}</td><td>${brl(soma(bonif, x => x.mov * custo(x)))}</td><td class="l">custo do cadastro</td></tr>
-  <tr><td class="l">Nota de perda (contagem)</td><td class="l">${esc(S.cfg.cfopPerda)}</td><td>${Object.values(baixasAjustadas(l)).reduce((a, it) => a + it.perda, 0)}</td><td>${brl(soma(perdas, x => x.perda * custo(x)))}</td><td class="l">custo do cadastro</td></tr>
+  <tr><td class="l">Nota de bonificação</td><td class="l">${esc(S.cfg.cfopBonif)}</td><td>${soma(bonif, x => x.mov)}</td><td>${brl(soma(bonif, x => x.mov * custo(x)))}</td><td class="l">custo oficial</td></tr>
+  <tr><td class="l">Nota de perda (contagem)</td><td class="l">${esc(S.cfg.cfopPerda)}</td><td>${Object.values(baixasAjustadas(l)).reduce((s, it) => s + it.perda, 0)}</td><td>${brl(soma(perdas, x => x.perda * custo(x)))}</td><td class="l">custo oficial</td></tr>
   <tr><td class="l">Retorno ao estoque</td><td class="l">—</td><td>${soma(dev, x => x.ret)}</td><td>—</td><td class="l">contagem física</td></tr>
   </tbody></table>
-  <p class="foot">Bonificação e perda saem fora do pedido de venda, para não diluir o preço médio. Sobra (contado acima do esperado) não gera nota: confira a carga e as vendas do SKU.</p>
+  <p class="foot">Bonificação e perda saem fora do pedido de venda, para não diluir o preço médio. Sobra (contado acima do esperado) não gera nota: confira a carga e as vendas do SKU. O pedido da carga (${esc(l.pedido || '—')}) só é excluído depois de lançar no estoque a venda, a bonificação e a perda.</p>
 
-  ${(() => { const F = fin(l); const nomes = { pix: 'Pix (InfinitePay)', credito: 'Crédito', debito: 'Débito', dinheiro: 'Dinheiro' };
-    return `<h2>Conferência financeira ${F.f.concluido ? `(concluída em ${fmtDT(F.f.concluidoEm)} por ${esc(F.f.concluidoPor)})` : '<span class="neg">(não concluída)</span>'}</h2>
-    <table><thead><tr><th class="l">Meio</th><th>PDV</th><th>Recebido</th><th>Diferença</th></tr></thead><tbody>
-    ${Object.entries(nomes).map(([k, n]) => `<tr><td class="l">${n}</td><td>${brl(F.r.formas[k] || 0)}</td><td>${F.real[k] === null ? '—' : brl(F.real[k])}</td><td>${F.real[k] === null ? '—' : brl(F.real[k] - (F.r.formas[k] || 0))}</td></tr>`).join('')}
-    ${F.f.outros.map(o => `<tr><td class="l">${esc(o.nome || 'Outro meio')}</td><td>—</td><td>${brl(o.valor || 0)}</td><td></td></tr>`).join('')}${F.r.formas.outro ? `<tr><td class="l">Outro meio (lançado no PDV)</td><td>${brl(F.r.formas.outro)}</td><td>—</td><td></td></tr>` : ''}
-    <tr><th class="l">Total</th><th>${brl(F.r.liq)}</th><th>${brl(F.realTotal)}</th><th>${brl(F.dif)}</th></tr></tbody></table>
-    ${F.f.ajustes.length ? `<table><thead><tr><th class="l">Justificativa</th><th class="l">Detalhe</th><th>Valor</th><th class="l">Efeito</th></tr></thead><tbody>${F.f.ajustes.map(a => `<tr><td class="l">${esc(CAT_AJ[a.cat]?.nome || a.cat)}</td><td class="l">${a.sku ? esc(a.sku) + ' · ' + a.qtd + ' pç · ' : ''}${esc(a.obs || '')} · ${esc(a.quem || '')}</td><td>${CAT_AJ[a.cat]?.neutro ? '' : a.dir === 'menos' ? '−' : '+'}${brl(a.valor)}</td><td class="l">${CAT_AJ[a.cat]?.neutro ? 'só entre formas' : CAT_AJ[a.cat]?.venda ? 'muda a venda' : 'fora da venda'}</td></tr>`).join('')}</tbody></table>` : ''}
-    <p>Venda no pedido do Tiny: <b>${brl(F.vendaAjustada)}</b> · ajustes fora da venda: ${brl(F.justificado - F.ajVenda)} · sem justificativa: <b class="${Math.abs(F.pendente) < .01 ? '' : 'neg'}">${brl(F.pendente)}</b></p>`; })()}
-  ${(() => { const M = margem(l); const shows = Object.fromEntries((l.shows || []).map(s => [s.id, s]));
-    return `<h2>Margem por show ${M.conf ? '' : '<span class="neg">(prévia: receita do PDV, sem conferência financeira)</span>'}</h2>${tabelaMargem(M, '')}
-    <p class="foot">DAS ${String(S.cfg.das || 0).replace('.', ',')}% sobre a receita · taxas ${M.taxaReal ? 'reais do extrato InfinitePay' : 'estimadas'} · CMV, bonificações e perdas pelo custo do cadastro${M.semCusto.length ? ` (${M.semCusto.length} SKUs sem custo: CMV subestimado)` : ''} · despesas do lote rateadas pela receita.</p>
-    ${(l.despesas || []).length ? `<table><thead><tr><th class="l">Despesa</th><th class="l">Show</th><th class="l">Obs.</th><th>Lançado</th></tr></thead><tbody>${l.despesas.map(d => `<tr><td class="l">${esc(d.cat)}</td><td class="l">${d.showId ? esc(shows[d.showId]?.cidade || '') : 'Todo o lote'}</td><td class="l">${esc(d.obs || '')}</td><td>${d.tipo === 'pct' ? String(d.valor).replace('.', ',') + '% da venda' : brl(d.valor)}</td></tr>`).join('')}</tbody></table>` : ''}`; })()}
-  <h2>Formas de pagamento</h2><table><thead><tr><th class="l">Forma</th><th>PDV</th>${inf ? '<th>InfinitePay</th><th>Diferença</th>' : ''}</tr></thead><tbody>
-  ${FORMAS.map(f => { const a = r.formas[f.id] || 0; const b = inf ? (inf.formas[f.id] || 0) : 0; return `<tr><td class="l">${f.nome}</td><td>${brl(a)}</td>${inf ? (FORA_INFINITE.includes(f.id) ? '<td>—</td><td>—</td>' : `<td>${brl(b)}</td><td class="${Math.abs(b - a) > .5 ? 'neg' : ''}">${brl(b - a)}</td>`) : ''}</tr>`; }).join('')}
-  <tr><th class="l">Total</th><th>${brl(r.liq)}</th>${inf ? `<th>${brl(Object.values(inf.formas).reduce((a, b) => a + b, 0))}</th><th></th>` : ''}</tr></tbody></table>
-  ${inf ? `<p class="foot">Extrato InfinitePay: ${inf.n} transações aprovadas entre ${fmtDT(inf.de)} e ${fmtDT(inf.ate)}. Dinheiro não passa pela InfinitePay: conferir com o caixa físico.</p>` : `<p class="foot">Sem extrato da InfinitePay. Taxas estimadas pelo PDV: ${brl(taxasPdv(l))} · líquido estimado ${brl(r.liq - taxasPdv(l))}.</p>`}
-  ${(() => { const a = analiseInfinite(l); if (!a) return '';
-    const tab = (o, t, total = false) => { const ks = Object.entries(o).sort((x, y) => y[1].valor - x[1].valor); if (!ks.length) return '';
-      const s = ks.reduce((a, [, x]) => ({ n: a.n + x.n, valor: a.valor + x.valor, taxa: a.taxa + x.taxa, liq: a.liq + x.liq }), { n: 0, valor: 0, taxa: 0, liq: 0 });
-      const ln = (k, x, g = 'td') => `<tr><${g} class="l">${esc(k)}</${g}><${g}>${x.n}</${g}><${g}>${brl(x.valor)}</${g}><${g}>${brl(x.taxa)}</${g}><${g}>${pctTaxa(x)}</${g}><${g}>${brl(x.liq)}</${g}></tr>`;
-      return `<table><thead><tr><th class="l">${t}</th><th>Qtd</th><th>Bruto</th><th>Taxa</th><th>Taxa efetiva</th><th>Líquido</th></tr></thead><tbody>${ks.map(([k, x]) => ln(k, x)).join('')}${total ? ln('Total', s, 'th') : ''}</tbody></table>`; };
-    return `<h2>Conferência InfinitePay</h2><div class="k"><div><b>${brl(a.bruto)}</b>bruto aprovado</div><div><b>${brl(a.taxa)}</b>taxas (${a.brutoCartao ? (a.taxa / a.brutoCartao * 100).toFixed(2).replace('.', ',') : 0}% dos cartões)</div><div><b>${brl(a.liq)}</b>líquido a receber</div><div><b>${a.conciliadas}/${a.pags}</b>pagamentos conciliados</div></div>
-    ${tab(a.porFormaBand, 'Forma · bandeira (baixa do contas a receber)', true)}${tab(a.porTerm, 'Origem (máquina / tap / Pix)')}${Object.keys(a.porParc).length ? tab(a.porParc, 'Crédito por parcelas') : ''}${tab(a.porShow, 'Show (data da transação)')}
-    ${a.semPdv.length ? `<p><b class="neg">Transações sem venda no PDV (${a.semPdv.length}, ${brl(a.semPdv.reduce((x, t) => x + t.valor, 0))}):</b></p><table><tbody>${a.semPdv.map(t => `<tr><td class="l">${fmtDT(t.t)}</td><td class="l">${FORMA[t.forma]} ${esc(t.band)} ${t.parc > 1 ? t.parc + 'x' : ''}</td><td class="l">${esc(t.term)}</td><td>${brl(t.valor)}</td></tr>`).join('')}</tbody></table>` : ''}
+  <h2>Contas a receber (baixa por forma e bandeira)</h2>
+  ${a ? (() => { const ks = Object.entries(a.porFormaBand).sort((x, y) => y[1].valor - x[1].valor);
+    const din = F.real.dinheiro || 0; const tot = { n: a.ap.length, valor: a.bruto + din + outrosRec, taxa: a.taxa, liq: a.liq + din + outrosRec };
+    return `<table><thead><tr><th class="l">Forma · bandeira</th><th>Qtd</th><th>Bruto</th><th>Taxa</th><th>Taxa efetiva</th><th>Líquido</th></tr></thead><tbody>
+    ${ks.map(([k, x]) => `<tr><td class="l">${esc(k)}</td><td>${x.n}</td><td>${brl(x.valor)}</td><td>${brl(x.taxa)}</td><td>${pctTaxa(x)}</td><td>${brl(x.liq)}</td></tr>`).join('')}
+    ${din ? `<tr><td class="l">Dinheiro (contado no caixa)</td><td>—</td><td>${brl(din)}</td><td>${brl(0)}</td><td>0,00%</td><td>${brl(din)}</td></tr>` : ''}
+    ${F.f.outros.filter(o => o.valor).map(o => `<tr><td class="l">${esc(o.nome || 'Outro meio')}</td><td>—</td><td>${brl(o.valor)}</td><td>—</td><td>—</td><td>${brl(o.valor)}</td></tr>`).join('')}
+    <tr><th class="l">Total</th><th>${tot.n}</th><th>${brl(tot.valor)}</th><th>${brl(tot.taxa)}</th><th>${pctTaxa(tot)}</th><th>${brl(tot.liq)}</th></tr></tbody></table>
+    <p class="foot">Baixa no Tiny: valor bruto recebido, taxa como despesa financeira, líquido igual ao crédito em conta. Extrato InfinitePay: ${inf.n} transações aprovadas entre ${fmtDT(inf.de)} e ${fmtDT(inf.ate)}${a.negadas.length ? ` · ${a.negadas.length} negadas ou canceladas fora dos totais` : ''}.</p>`; })()
+    : `<p class="neg">Sem extrato da InfinitePay: importe na aba Relatório para baixar o contas a receber pelas taxas reais. Taxas estimadas pelo PDV: ${brl(taxasPdv(l))}.</p>`}
+
+  <h2>Conferência financeira ${F.f.concluido ? `<span class="small">concluída em ${fmtDT(F.f.concluidoEm)} por ${esc(F.f.concluidoPor)}</span>` : '<span class="neg">(não concluída)</span>'}</h2>
+  ${blocoRecebimento()}
+  <p>Venda no pedido do Tiny: <b>${brl(F.vendaAjustada)}</b> · ajustes que saem da margem: ${brl(-(F.justificado - F.ajVenda))}</p>
+  ${a ? `<h2>Conciliação venda a venda (PDV × InfinitePay)</h2>
+    <p><b>${a.conciliadas} de ${a.pags}</b> pagamentos do PDV com transação de mesma forma e valor em até 30 minutos.${a.conciliadas < a.pags ? ' <span class="neg">Venda lançada no app muito depois de passar na maquininha não concilia: confira as listas abaixo.</span>' : ''}</p>
+    ${a.semPdv.length ? `<table><thead><tr><th class="l" colspan="4">Transações sem venda no PDV (${a.semPdv.length} · ${brl(a.semPdv.reduce((s, t) => s + t.valor, 0))})</th></tr></thead><tbody>${a.semPdv.map(t => `<tr><td class="l">${fmtDT(t.t)}</td><td class="l">${FORMA[t.forma]}${t.forma !== 'pix' ? ' · ' + esc(titulo(t.band)) : ''}${t.parc > 1 ? ' ' + t.parc + 'x' : ''}</td><td class="l">${esc(t.term)}</td><td>${brl(t.valor)}</td></tr>`).join('')}</tbody></table>` : ''}
     ${a.semTx.length ? `<p><b class="neg">Pagamentos do PDV sem transação (${a.semTx.length}):</b> ${a.semTx.map(p => `#${p.num} ${FORMA[p.forma]} ${brl(p.valor)}`).join(' · ')}</p>` : ''}
-    ${a.negadas.length ? `<p class="foot">${a.negadas.length} transações negadas ou canceladas não entram nos totais.</p>` : ''}`; })()}
-
-  <h2>Por show · formas de pagamento</h2><table><thead><tr><th class="l">Show</th><th>Vendas</th><th>Peças</th><th>Pix</th><th>Crédito</th><th>Débito</th><th>Dinheiro</th><th>Outro</th><th>Líquido</th></tr></thead><tbody>
-  ${(l.shows || []).map(s => { const x = resumo(l, s.id); return `<tr><td class="l">${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</td><td>${x.n}</td><td>${x.pecas}</td>${FORMAS.map(f => `<td>${brl(x.formas[f.id] || 0)}</td>`).join('')}<td><b>${brl(x.liq)}</b></td></tr>`; }).join('')}</tbody></table>
+    <table><thead><tr><th class="l">Origem (máquina / tap / Pix)</th><th>Qtd</th><th>Bruto</th><th>Taxa</th><th>Líquido</th></tr></thead><tbody>${Object.entries(a.porTerm).map(([k, x]) => `<tr><td class="l">${esc(k)}</td><td>${x.n}</td><td>${brl(x.valor)}</td><td>${brl(x.taxa)}</td><td>${brl(x.liq)}</td></tr>`).join('')}</tbody></table>` : ''}
 
   ${perdas.length || sobras.length ? `<h2>Divergências da contagem</h2><table><thead><tr><th class="l">SKU</th><th class="l">Descrição</th><th>Esperado</th><th>Contado</th><th>Diferença</th><th class="l">Observação</th></tr></thead><tbody>
   ${[...perdas, ...sobras].map(x => `<tr><td class="l">${esc(x.s)}</td><td class="l">${esc(x.p.descricao)}</td><td>${x.saldo}</td><td>${x.ret ?? 0}</td><td class="${x.dif < 0 ? 'neg' : ''}">${x.dif > 0 ? '+' : ''}${x.dif}</td><td class="l">${esc(obs[x.s] || '—')}</td></tr>`).join('')}</tbody></table>` : ''}
 
-  <h2>Itens por SKU</h2><table><thead><tr><th class="l">SKU</th><th class="l">Descrição</th><th>Carga</th><th>Venda</th><th>Preço médio</th><th>Total venda</th><th>Bonif.</th><th>Perda</th><th>Sobra</th><th>Retorno</th></tr></thead><tbody>
-  ${linhas.map(x => `<tr><td class="l">${esc(x.s)}</td><td class="l">${esc(x.p.descricao)}</td><td>${x.carga}</td><td>${x.vendido}</td><td>${x.vendido ? brl(x.valor / x.vendido) : '—'}</td><td>${brl(x.valor)}</td><td>${x.mov}</td><td class="${x.perda ? 'neg' : ''}">${x.perda}</td><td>${x.sobra}</td><td>${x.ret ?? '—'}</td></tr>`).join('')}
-  <tr><th class="l" colspan="2">Total</th><th>${soma(linhas, x => x.carga)}</th><th>${soma(linhas, x => x.vendido)}</th><th></th><th>${brl(soma(linhas, x => x.valor))}</th><th>${soma(linhas, x => x.mov)}</th><th>${soma(linhas, x => x.perda)}</th><th>${soma(linhas, x => x.sobra)}</th><th>${soma(linhas, x => x.ret || 0)}</th></tr></tbody></table>
-
-  ${movs.length ? `<h2>Bonificações e retiradas (CFOP ${esc(S.cfg.cfopBonif)})</h2><table><thead><tr><th class="l">Data</th><th class="l">Tipo</th><th class="l">SKU</th><th>Qtd</th><th class="l">Autorizou</th><th class="l">Lançou</th><th class="l">Obs.</th></tr></thead><tbody>
-  ${movs.map(m => `<tr><td class="l">${fmtDT(m.ts)}</td><td class="l">${esc(MOV[m.tipo] || m.tipo)}</td><td class="l">${esc(m.sku)}</td><td>${m.qtd}</td><td class="l">${esc(m.autorizou)}</td><td class="l">${esc(m.quem)}</td><td class="l">${esc(m.obs)}</td></tr>`).join('')}</tbody></table>` : ''}
-  ${descs.length || semSaldo.length ? `<h2>Exceções</h2><table><tbody>${descs.map(v => `<tr><td class="l">Venda #${v.num}</td><td class="l">Desconto ${brl(v.desconto)} · ${esc(v.descMotivo)} · ${esc(v.vendedor)}</td></tr>`).join('')}${semSaldo.map(i => `<tr><td class="l">Venda #${i.num}</td><td class="l">${esc(i.sku)} vendido sem saldo na carga · ${esc(i.motivo)}</td></tr>`).join('')}</tbody></table>` : ''}
+  ${(() => { const mov = linhas.filter(x => x.vendido || x.mov || x.perda || x.sobra); const so = linhas.filter(x => !(x.vendido || x.mov || x.perda || x.sobra));
+    return `<h2>Itens movimentados</h2><table class="itens"><thead><tr><th class="l">SKU</th><th class="l">Descrição</th><th>Carga</th><th>Venda</th><th>Preço médio</th><th>Total venda</th><th>Bonif.</th><th>Perda</th><th>Sobra</th><th>Retorno</th></tr></thead><tbody>
+    ${mov.map(x => `<tr><td class="l">${esc(x.s)}</td><td class="l">${esc(x.p.descricao)}</td><td>${x.carga}</td><td>${x.vendido}</td><td>${x.vendido ? brl(x.valor / x.vendido) : '—'}</td><td>${brl(x.valor)}</td><td>${x.mov}</td><td class="${x.perda ? 'neg' : ''}">${x.perda}</td><td>${x.sobra}</td><td>${x.ret ?? '—'}</td></tr>`).join('')}
+    <tr><th class="l" colspan="2">Total do lote (inclui o retorno integral abaixo)</th><th>${soma(linhas, x => x.carga)}</th><th>${soma(linhas, x => x.vendido)}</th><th></th><th>${brl(soma(linhas, x => x.valor))}</th><th>${soma(linhas, x => x.mov)}</th><th>${soma(linhas, x => x.perda)}</th><th>${soma(linhas, x => x.sobra)}</th><th>${soma(linhas, x => x.ret || 0)}</th></tr></tbody></table>
+    ${so.length ? `<p class="small"><b>Retorno integral (sem venda, bonificação ou divergência): ${so.length} SKUs, ${soma(so, x => x.ret ?? x.carga)} peças.</b> ${so.map(x => `${esc(x.s)} (${x.ret ?? x.carga})`).join(' · ')}</p>` : ''}`; })()}
   <div class="sign"><div>Responsável pela venda</div><div>Conferente da contagem</div></div>
   <p class="foot">Gerado pelo PDV Shows Indião · caixa ${esc(S.cfg.caixa)} · ${vendasLote(l, true).length} registros de venda, ${S.movs.filter(m => m.loteId === l.id).length} de bonificação.</p>`;
 }
