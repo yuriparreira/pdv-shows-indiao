@@ -158,7 +158,7 @@ function atualizarSelo() { const el = document.querySelector('.net'); if (!el) r
 // ---------- estado ----------
 const S = {
   produtos: new Map(), lotes: [], vendas: [], movs: [], cfg: { vendedor: '', caixa: '', tema: 'dark', aparelho: '', cfopBonif: '5.910 / 6.910', cfopPerda: '5.927',
-    taxas: { debito: 1.37, c1: 3.14, c2: 5.38, c3: 6.12, c4: 6.86, c5: 7.60, c6: 8.34 } }, tabela: {},
+    taxas: { debito: 1.37, c1: 3.14, c2: 5.38, c3: 6.12, c4: 6.86, c5: 7.60, c6: 8.34 }, das: 0, comissaoPct: 0 }, tabela: {},
   view: 'home', loteId: null, tab: 'vender', busca: '', cat: '', todoCatalogo: false, esgotados: false,
   cart: [], cartDesc: 0, cartDescMotivo: '', pagamentos: [], sheet: null, contagemRevelada: false, infinite: null,
 };
@@ -447,6 +447,9 @@ function vConfig() {
   <div class="card"><h2>Notas à parte (relatório)</h2>
   <label class="f">CFOP da bonificação<input class="i" name="cfopBonif" value="${esc(S.cfg.cfopBonif)}"></label>
   <label class="f">CFOP da perda de contagem<input class="i" name="cfopPerda" value="${esc(S.cfg.cfopPerda)}"></label></div>
+  <div class="card"><h2>Margem por show</h2><p class="muted small">Alíquota efetiva do DAS (Simples Nacional), tratada como dedução da receita como na modelagem financeira. Comissão padrão é sugerida ao lançar a despesa.</p>
+  <div class="grid2"><label class="f">DAS efetivo (%)<input class="i" name="das" inputmode="decimal" value="${String(S.cfg.das || 0).replace('.', ',')}"></label>
+  <label class="f">Comissão padrão (%)<input class="i" name="comissaoPct" inputmode="decimal" value="${String(S.cfg.comissaoPct || 0).replace('.', ',')}"></label></div></div>
   <div class="card"><h2>Taxas estimadas da InfinitePay (%)</h2><p class="muted small">Usadas antes de importar o extrato. Débito, crédito à vista, 2x e 3x vêm do extrato de out/26; 4x a 6x são estimativa: confirme no app da InfinitePay.</p>
   <div class="grid2">${[['debito', 'Débito'], ['c1', 'Crédito 1x'], ['c2', 'Crédito 2x'], ['c3', 'Crédito 3x'], ['c4', 'Crédito 4x'], ['c5', 'Crédito 5x'], ['c6', 'Crédito 6x']].map(([k, n]) => `<label class="f">${n}<input class="i" name="tx_${k}" inputmode="decimal" value="${String(S.cfg.taxas[k]).replace('.', ',')}"></label>`).join('')}</div></div>
   <div class="card"><h2>Sincronização em tempo real</h2>
@@ -501,13 +504,14 @@ const rotulo = p => [p.var?.Cor, p.var?.Tamanho].filter(Boolean).join(' · ') ||
 function vLote() {
   const l = lote(); if (!l) { S.view = 'home'; return vHome(); }
   const sh = showAtual(l); const fechado = l.status !== 'aberto';
-  const tabs = [['vender', 'Vender'], ['vendas', 'Vendas'], ['movs', 'Bonificações'], ['contagem', 'Contagem'], ['financeiro', 'Financeiro'], ['relatorio', 'Relatório']];
+  const tabs = [['vender', 'Vender'], ['vendas', 'Vendas'], ['movs', 'Bonificações'], ['contagem', 'Contagem'], ['financeiro', 'Financeiro'], ['margem', 'Margem'], ['relatorio', 'Relatório']];
   let body = '';
   if (S.tab === 'vender') body = fechado ? `<div class="warn">${l.status === 'fechado' ? 'Lote fechado. Veja o Relatório.' : 'Vendas travadas para a contagem. Termine a contagem na aba Contagem.'}</div>${l.status === 'contagem' ? '<button class="btn block" data-a="destravar">Destravar vendas (zera a contagem)</button>' : ''}` : tVender(l);
   if (S.tab === 'vendas') body = tVendas(l);
   if (S.tab === 'movs') body = tMovs(l);
   if (S.tab === 'contagem') body = tContagem(l);
   if (S.tab === 'financeiro') body = tFinanceiro(l);
+  if (S.tab === 'margem') body = tMargem(l);
   if (S.tab === 'relatorio') body = tRelatorio(l);
   return topo(l.pedido ? 'Pedido ' + l.pedido : 'Lote', sh ? `${sh.cidade}/${sh.uf} · ${fmtD(sh.data)}` : 'sem show', true,
     `<button class="iconbtn" data-a="sheetShow" aria-label="Trocar show">📍</button>`) +
@@ -701,6 +705,68 @@ function tFinanceiro(l) {
     ${fe ? `<p class="small">Conferência concluída em ${fmtDT(F.f.concluidoEm)} por ${esc(F.f.concluidoPor)}.</p><button class="btn block" data-a="reabrirFin">Reabrir conferência</button>`
       : `<button class="btn ok block" ${F.pronto ? '' : 'disabled'} data-a="concluirFin">Concluir conferência financeira</button>${F.pronto ? '' : '<p class="muted small">Libera quando todas as formas estiverem informadas e a diferença sem justificativa for zero.</p>'}`}</div>`;
 }
+// ---------- margem de contribuição por show ----------
+const CATS_DESP = ['Comissão sobre vendas', 'Diárias de alimentação', 'Fotos', 'Transporte / combustível', 'Hospedagem', 'Material de venda', 'Outros'];
+// Receita (conferida ou PDV) − DAS − taxas de cartão − CMV − bonificações − perdas − despesas, por show e no lote
+function margem(l) {
+  const F = fin(l); const conf = F.f.concluido; const shows = l.shows || [];
+  const cols = shows.map(s => ({ id: s.id, nome: `${s.cidade}/${s.uf}`, data: s.data, rec: 0, das: 0, taxa: 0, cmv: 0, bonif: 0, perda: 0, desp: 0, despItens: [] }));
+  const col = id => cols.find(c => c.id === id) || cols[0];
+  const custo = sku => S.produtos.get(sku)?.custo || 0; const semCusto = new Set();
+  const cmvDe = (sku, q) => { const c = custo(sku); if (!c && q) semCusto.add(sku); return c * q; };
+  // receita e CMV das vendas registradas, no show em que aconteceram
+  vendasLote(l).forEach(v => { const c = col(v.showId); if (!c) return; c.rec += totalVenda(v).liq; v.itens.forEach(i => c.cmv += cmvDe(i.sku, i.qtd)); });
+  // taxas de cartão: reais do extrato (pela data da transação) ou estimadas pelo PDV
+  const an = analiseInfinite(l); let taxaReal = false;
+  if (an) { taxaReal = true; Object.entries(an.porShow).forEach(([nome, x]) => { const c = cols.find(c => c.nome === nome); if (c) c.taxa += x.taxa; else if (cols[0]) cols[0].taxa += x.taxa; }); }
+  else vendasLote(l).forEach(v => { const c = col(v.showId); if (c) v.pagamentos.forEach(p => c.taxa += p.valor * taxaEst(p) / 100); });
+  // ajustes da conferência financeira que mudam a venda: venda achada no extrato vai para o show da transação; o resto é rateado
+  const recPDV = cols.reduce((a, c) => a + c.rec, 0); const peso = c => recPDV ? c.rec / recPDV : 1 / (cols.length || 1);
+  if (conf) F.f.ajustes.filter(a => CAT_AJ[a.cat]?.venda).forEach(a => {
+    const v = F.sinal(a); let alvo = null;
+    if (a.txId && an) { const t = an.ap.find(t => t.id + t.t === a.txId); if (t) { const d = new Date(+new Date(t.t) - CORTE_H * 3600e3); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); const dia = d.toISOString().slice(0, 10);
+      alvo = cols.filter(c => c.data <= dia && (+new Date(dia) - +new Date(c.data)) <= 864e5).sort((x, y) => y.data.localeCompare(x.data))[0]; } }
+    if (alvo) alvo.rec += v; else cols.forEach(c => c.rec += v * peso(c));
+    if (a.cat === 'venda_nr' && a.sku && a.qtd && !l.perdaExportada) { const k = cmvDe(a.sku, a.qtd); if (alvo) alvo.cmv += k; else cols.forEach(c => c.cmv += k * peso(c)); }
+  });
+  // bonificações a custo no show em que saíram; perdas da contagem (já descontadas as vendas achadas) rateadas pela receita
+  movsLote(l).forEach(m => { const c = col(m.showId); if (c) c.bonif += cmvDe(m.sku, m.qtd); });
+  const perdaTot = Object.entries(baixasAjustadas(l)).reduce((a, [s, it]) => a + cmvDe(s, it.perda), 0);
+  const recTot = cols.reduce((a, c) => a + c.rec, 0); const pesoF = c => recTot ? c.rec / recTot : 1 / (cols.length || 1);
+  cols.forEach(c => { c.perda = perdaTot * pesoF(c); c.das = c.rec * (S.cfg.das || 0) / 100; });
+  // despesas: do show ou do lote (rateadas pela receita); comissão em % incide sobre a receita
+  (l.despesas || []).forEach(d => {
+    const alvo = d.showId ? cols.filter(c => c.id === d.showId) : cols;
+    alvo.forEach(c => { const base = d.showId ? 1 : pesoF(c); const v = d.tipo === 'pct' ? c.rec * d.valor / 100 : d.valor * base; c.desp += v; c.despItens.push({ ...d, efetivo: v }); });
+  });
+  cols.forEach(c => { c.mc = c.rec - c.das - c.taxa - c.cmv - c.bonif - c.perda - c.desp; c.pct = c.rec ? c.mc / c.rec * 100 : 0; });
+  const tot = { nome: 'Total do lote', rec: 0, das: 0, taxa: 0, cmv: 0, bonif: 0, perda: 0, desp: 0, mc: 0 };
+  cols.forEach(c => ['rec', 'das', 'taxa', 'cmv', 'bonif', 'perda', 'desp', 'mc'].forEach(k => tot[k] += c[k])); tot.pct = tot.rec ? tot.mc / tot.rec * 100 : 0;
+  return { cols, tot, conf, taxaReal, semCusto: [...semCusto] };
+}
+const LINHAS_MG = [['rec', 'Receita'], ['das', '(−) DAS'], ['taxa', '(−) Taxas de cartão'], ['cmv', '(−) CMV (custo das peças)'], ['bonif', '(−) Bonificações a custo'], ['perda', '(−) Perdas da contagem'], ['desp', '(−) Despesas do show'], ['mc', '= Margem de contribuição']];
+function tabelaMargem(M, cls = 't') {
+  const cs = M.cols.length > 1 ? [...M.cols, M.tot] : [M.tot];
+  return `<table class="${cls}"><thead><tr><th class="l"></th>${cs.map(c => `<th>${esc(c.nome)}</th>`).join('')}</tr></thead><tbody>
+  ${LINHAS_MG.map(([k, n]) => `<tr${k === 'mc' ? ' style="font-weight:800"' : ''}><td class="l">${n}</td>${cs.map(c => `<td class="${k === 'mc' && c.mc < 0 ? 'neg' : ''}">${brl(c[k])}</td>`).join('')}</tr>`).join('')}
+  <tr><td class="l">Margem %</td>${cs.map(c => `<td class="${c.pct < 0 ? 'neg' : ''}">${c.pct.toFixed(1).replace('.', ',')}%</td>`).join('')}</tr></tbody></table>`;
+}
+function tMargem(l) {
+  const M = margem(l);
+  const avisos = [];
+  if (!M.conf) avisos.push('Prévia: a receita é a lançada no PDV. Conclua a conferência financeira para usar a venda conferida.');
+  if (!S.cfg.das) avisos.push('DAS em 0%: informe a alíquota efetiva em ⚙ › Margem por show.');
+  if (M.semCusto.length) avisos.push(`${M.semCusto.length} SKUs vendidos ou bonificados sem custo no cadastro (CMV subestimado): ${M.semCusto.slice(0, 6).map(esc).join(', ')}${M.semCusto.length > 6 ? '…' : ''}.`);
+  if (!M.taxaReal) avisos.push('Taxas de cartão estimadas pela tabela em ⚙. Importe o extrato da InfinitePay no Relatório para usar as reais.');
+  const shows = Object.fromEntries((l.shows || []).map(s => [s.id, s]));
+  return `${avisos.map(a => `<div class="warn">${a}</div>`).join('')}
+  <div class="card"><h2>Margem por show</h2><div class="kpis" style="margin-bottom:10px"><div class="kpi"><b>${brl(M.tot.mc)}</b><span>margem de contribuição do lote</span></div><div class="kpi"><b class="${M.tot.pct < 0 ? 'neg' : ''}">${M.tot.pct.toFixed(1).replace('.', ',')}%</b><span>sobre a receita</span></div></div>
+  <div class="tw">${tabelaMargem(M)}</div></div>
+  <div class="card"><h2>Despesas do show</h2>
+  <p class="muted small">Comissão, diárias de alimentação, fotos e o que mais sair do caixa do show. Ônibus e hotel são da turnê. Despesa do lote inteiro é rateada pela receita de cada show.</p>
+  ${(l.despesas || []).map((d, i) => `<div class="line"><div class="grow"><b>${esc(d.cat)}</b><div class="muted small">${d.showId ? esc(shows[d.showId]?.cidade || '') : 'Todo o lote'}${d.obs ? ' · ' + esc(d.obs) : ''} · ${esc(d.quem || '')}</div></div><b>${d.tipo === 'pct' ? String(d.valor).replace('.', ',') + '% da venda' : brl(d.valor)}</b><button class="iconbtn" data-a="rmDesp" data-i="${i}">✕</button></div>`).join('') || '<div class="muted small">Nenhuma despesa lançada.</div>'}
+  <button class="btn primary block" style="margin-top:10px" data-a="novaDesp">+ Lançar despesa</button></div>`;
+}
 function tRelatorio(l) {
   const r = resumo(l); const sh = l.shows || [];
   const inf = S.infinite && S.infinite.loteId === l.id ? S.infinite : null;
@@ -729,7 +795,7 @@ function renderSheet() {
   if (!el) { el = document.createElement('div'); el.id = 'sheet'; el.className = 'scrim'; document.body.appendChild(el); }
   const k = S.sheet.k; let h = '';
   if (k === 'modelo') h = shModelo(); if (k === 'cart') h = shCart(); if (k === 'pagar') h = shPagar(); if (k === 'show') h = shShow();
-  if (k === 'mov') h = shMov(); if (k === 'texto') h = shTexto(); if (k === 'cargaPrev') h = shCargaPrev(); if (k === 'ajuste') h = shAjuste();
+  if (k === 'mov') h = shMov(); if (k === 'texto') h = shTexto(); if (k === 'cargaPrev') h = shCargaPrev(); if (k === 'ajuste') h = shAjuste(); if (k === 'despesa') h = shDespesa();
   el.innerHTML = `<div class="sheet" role="dialog"><div class="grab"></div>${h}</div>`;
 }
 function shModelo() {
@@ -803,6 +869,16 @@ function shCargaPrev() {
   <div class="card" style="margin-top:12px">${itens.map(([s, q]) => `<div class="line"><div class="grow"><div style="font-weight:600">${esc(S.produtos.get(s)?.descricao || s)}</div><div class="muted small">${esc(s)}</div></div><b>${q}</b></div>`).join('')}</div>
   <p class="muted small">Compare com o total de peças do pedido no PDF antes de confirmar.</p>
   <div class="grid2"><button class="btn" data-a="fechar">Cancelar</button><button class="btn primary" data-a="usarCarga">Usar esta carga</button></div>`;
+}
+function shDespesa() {
+  const l = lote(); const st = S.sheet; const cat = st.cat || CATS_DESP[0]; const pct = (st.tipo || (cat === 'Comissão sobre vendas' ? 'pct' : 'valor')) === 'pct';
+  return `<div class="row"><h3 class="grow">Lançar despesa</h3><button class="iconbtn" data-a="fechar">✕</button></div><form data-f="despesa">
+  <label class="f">Tipo<select class="i" name="cat" data-in="despCat">${CATS_DESP.map(c => `<option ${c === cat ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
+  <label class="f">De qual show<select class="i" name="showId"><option value="">Todo o lote (rateio pela receita)</option>${(l.shows || []).map(s => `<option value="${s.id}" ${s.id === showAtual(l)?.id ? 'selected' : ''}>${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</option>`).join('')}</select></label>
+  <div class="grid2"><label class="f">Forma<select class="i" name="tipo" data-in="despTipo"><option value="valor" ${!pct ? 'selected' : ''}>Valor (R$)</option><option value="pct" ${pct ? 'selected' : ''}>% sobre a venda</option></select></label>
+  <label class="f">${pct ? 'Percentual' : 'Valor (R$)'}<input class="i" name="valor" inputmode="decimal" required value="${pct && S.cfg.comissaoPct ? String(S.cfg.comissaoPct).replace('.', ',') : ''}"></label></div>
+  <label class="f">Observação<input class="i" name="obs" placeholder="${cat === 'Comissão sobre vendas' ? 'ex.: Jonathas e Luquinhas' : 'ex.: 3 diárias × R$ 60'}"></label>
+  <button class="btn ok block">Lançar</button></form>`;
 }
 function shAjuste() {
   const l = lote(); const F = fin(l); const st = S.sheet; const cat = CAT_AJ[st.cat || 'desconto'];
@@ -921,6 +997,8 @@ const A = {
   rmOutro: async e => { const l = lote(); fin(l).f.outros.splice(+e.dataset.i, 1); await saveLote(l); render(); },
   ajusteDeTx: e => { const a = analiseInfinite(lote()); const t = a?.semPdv.find(x => x.id + x.t === e.dataset.tx); if (!t) return;
     S.sheet = { k: 'ajuste', cat: 'venda_nr', valor: t.valor, obs: `${FORMA[t.forma]} ${fmtDT(t.t)} · ${t.term}`, txId: e.dataset.tx }; renderSheet(); },
+  novaDesp: () => { S.sheet = { k: 'despesa' }; renderSheet(); },
+  rmDesp: async e => { const l = lote(); const d = l.despesas[+e.dataset.i]; const ok = await perguntar({ titulo: 'Remover despesa?', texto: `${d.cat}: ${d.tipo === 'pct' ? d.valor + '%' : brl(d.valor)}`, ok: 'Remover', perigo: true, semInput: true }); S.sheet = null; if (!ok) return render(); l.despesas.splice(+e.dataset.i, 1); await saveLote(l); render(); },
   novoAjuste: () => { S.sheet = { k: 'ajuste', cat: fin(lote()).pendente < 0 ? 'desconto' : 'venda_nr' }; renderSheet(); },
   rmAjuste: async e => { const l = lote(); fin(l).f.ajustes.splice(+e.dataset.i, 1); await saveLote(l); render(); },
   concluirFin: async () => { const l = lote(); const F = fin(l); if (!F.pronto) return;
@@ -977,7 +1055,7 @@ async function salvarMov(fd) {
 document.addEventListener('submit', async ev => {
   const f = ev.target; const k = f.dataset.f; if (!k) return; ev.preventDefault(); const fd = new FormData(f);
   if (k === 'texto') { const r = S.sheet.res; const v = fd.get('v'); S.sheet = null; r && r(v); return; }
-  if (k === 'cfg') { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
+  if (k === 'cfg') { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); S.cfg.das = num(fd.get('das')); S.cfg.comissaoPct = num(fd.get('comissaoPct')); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
     const urlAntes = S.cfg.sincUrl; S.cfg.sincUrl = (fd.get('sincUrl') || '').trim(); S.cfg.sincChave = (fd.get('sincChave') || '').trim(); await saveCfg();
     if (Sinc.ativo() && S.cfg.sincUrl !== urlAntes) { // servidor novo: sobe tudo o que existe neste aparelho
       S.lotes.forEach(l => Sinc.st.pend['lote:' + l.id] = ++Sinc.cont); S.vendas.forEach(v => Sinc.st.pend['venda:' + v.id] = ++Sinc.cont); S.movs.forEach(m => Sinc.st.pend['mov:' + m.id] = ++Sinc.cont);
@@ -993,6 +1071,8 @@ document.addEventListener('submit', async ev => {
   }
   if (k === 'novoShow') { const l = lote(); const sh = { id: uid(), cidade: fd.get('cidade').trim(), uf: fd.get('uf'), data: fd.get('data'), evento: fd.get('evento').trim() }; l.shows.push(sh); l.showAtual = sh.id; await saveLote(l); S.sheet = null; render(); toast(`Agora vendendo em ${sh.cidade}/${sh.uf}`); }
   if (k === 'mov') salvarMov(fd);
+  if (k === 'despesa') { const l = lote(); const d = { id: uid(), cat: fd.get('cat'), showId: fd.get('showId') || '', tipo: fd.get('tipo'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: S.cfg.vendedor, ts: now() };
+    if (!d.valor) { toast('Informe o valor', null, true); return; } (l.despesas ||= []).push(d); await saveLote(l); S.sheet = null; render(); toast('Despesa lançada'); }
   if (k === 'ajuste') { const l = lote(); const cat = CAT_AJ[fd.get('cat')]; const a = { id: uid(), cat: cat.id, dir: cat.neutro ? 'mais' : fd.get('dir'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: S.cfg.vendedor, ts: now() };
     if (cat.sku && fd.get('sku')) { a.sku = fd.get('sku'); a.qtd = Math.max(1, Math.round(num(fd.get('qtd')))); }
     if (fd.get('txId')) a.txId = fd.get('txId');
@@ -1011,6 +1091,8 @@ document.addEventListener('input', async ev => {
 });
 document.addEventListener('change', async ev => {
   const t = ev.target;
+  if (t.dataset.in === 'despCat') { S.sheet = { k: 'despesa', cat: t.value }; renderSheet(); return; }
+  if (t.dataset.in === 'despTipo') { S.sheet = { ...S.sheet, k: 'despesa', cat: document.querySelector('#sheet [name=cat]').value, tipo: t.value }; renderSheet(); return; }
   if (t.dataset.in === 'ajCat') { S.sheet = { ...S.sheet, k: 'ajuste', cat: t.value }; renderSheet(); return; }
   if (['finReal', 'outroNome', 'outroValor'].includes(t.dataset.in)) { const l = lote(); const F = fin(l);
     if (t.dataset.in === 'finReal') { if (t.value.trim() === '') delete F.f.real[t.dataset.f]; else F.f.real[t.dataset.f] = num(t.value); }
@@ -1210,6 +1292,10 @@ function relatorioHTML(l) {
     <tr><th class="l">Total</th><th>${brl(F.r.liq)}</th><th>${brl(F.realTotal)}</th><th>${brl(F.dif)}</th></tr></tbody></table>
     ${F.f.ajustes.length ? `<table><thead><tr><th class="l">Justificativa</th><th class="l">Detalhe</th><th>Valor</th><th class="l">Efeito</th></tr></thead><tbody>${F.f.ajustes.map(a => `<tr><td class="l">${esc(CAT_AJ[a.cat]?.nome || a.cat)}</td><td class="l">${a.sku ? esc(a.sku) + ' · ' + a.qtd + ' pç · ' : ''}${esc(a.obs || '')} · ${esc(a.quem || '')}</td><td>${CAT_AJ[a.cat]?.neutro ? '' : a.dir === 'menos' ? '−' : '+'}${brl(a.valor)}</td><td class="l">${CAT_AJ[a.cat]?.neutro ? 'só entre formas' : CAT_AJ[a.cat]?.venda ? 'muda a venda' : 'fora da venda'}</td></tr>`).join('')}</tbody></table>` : ''}
     <p>Venda no pedido do Tiny: <b>${brl(F.vendaAjustada)}</b> · ajustes fora da venda: ${brl(F.justificado - F.ajVenda)} · sem justificativa: <b class="${Math.abs(F.pendente) < .01 ? '' : 'neg'}">${brl(F.pendente)}</b></p>`; })()}
+  ${(() => { const M = margem(l); const shows = Object.fromEntries((l.shows || []).map(s => [s.id, s]));
+    return `<h2>Margem por show ${M.conf ? '' : '<span class="neg">(prévia: receita do PDV, sem conferência financeira)</span>'}</h2>${tabelaMargem(M, '')}
+    <p class="foot">DAS ${String(S.cfg.das || 0).replace('.', ',')}% sobre a receita · taxas ${M.taxaReal ? 'reais do extrato InfinitePay' : 'estimadas'} · CMV, bonificações e perdas pelo custo do cadastro${M.semCusto.length ? ` (${M.semCusto.length} SKUs sem custo: CMV subestimado)` : ''} · despesas do lote rateadas pela receita.</p>
+    ${(l.despesas || []).length ? `<table><thead><tr><th class="l">Despesa</th><th class="l">Show</th><th class="l">Obs.</th><th>Lançado</th></tr></thead><tbody>${l.despesas.map(d => `<tr><td class="l">${esc(d.cat)}</td><td class="l">${d.showId ? esc(shows[d.showId]?.cidade || '') : 'Todo o lote'}</td><td class="l">${esc(d.obs || '')}</td><td>${d.tipo === 'pct' ? String(d.valor).replace('.', ',') + '% da venda' : brl(d.valor)}</td></tr>`).join('')}</tbody></table>` : ''}`; })()}
   <h2>Formas de pagamento</h2><table><thead><tr><th class="l">Forma</th><th>PDV</th>${inf ? '<th>InfinitePay</th><th>Diferença</th>' : ''}</tr></thead><tbody>
   ${FORMAS.map(f => { const a = r.formas[f.id] || 0; const b = inf ? (inf.formas[f.id] || 0) : 0; return `<tr><td class="l">${f.nome}</td><td>${brl(a)}</td>${inf ? (FORA_INFINITE.includes(f.id) ? '<td>—</td><td>—</td>' : `<td>${brl(b)}</td><td class="${Math.abs(b - a) > .5 ? 'neg' : ''}">${brl(b - a)}</td>`) : ''}</tr>`; }).join('')}
   <tr><th class="l">Total</th><th>${brl(r.liq)}</th>${inf ? `<th>${brl(Object.values(inf.formas).reduce((a, b) => a + b, 0))}</th><th></th>` : ''}</tr></tbody></table>
