@@ -190,7 +190,7 @@ async function entrarGestor() {
 const ABAS_VENDEDOR = ['vender', 'movs', 'contagem'];
 const SO_GESTOR = new Set(['importarCaixa', 'destravar', 'fecharLote', 'corrigirData', 'precoItem', 'reabrirFin', 'concluirFin', 'enviarConfig', 'backupTudo', 'sincAgora',
   'novaDesp', 'rmDesp', 'novoAjuste', 'rmAjuste', 'addOutro', 'rmOutro', 'csvTiny', 'tinyCsv', 'pdf', 'cancelarVenda', 'cancelarMov', 'contarCarga', 'precoModelo', 'baixarFotos', 'ajusteDeTx']);
-const precisaGestor = el => { const a = el.dataset.a; return SO_GESTOR.has(a) || (a === 'ir' && ['novo', 'catalogo'].includes(el.dataset.v)) || (a === 'tab' && !ABAS_VENDEDOR.includes(el.dataset.t)); };
+const precisaGestor = el => { const a = el.dataset.a; return SO_GESTOR.has(a) || (a === 'ir' && el.dataset.v === 'catalogo') || (a === 'tab' && !ABAS_VENDEDOR.includes(el.dataset.t)); };
 const saveLote = l => { l.atualizado = now(); return DB.put('lotes', l); };
 
 // ---------- catálogo ----------
@@ -319,7 +319,7 @@ async function importarCarga(file, l) {
   await aplicarCarga(l, carga, file.name);
   return { linhas, pecas: Object.values(carga).reduce((a, b) => a + b, 0), semCadastro: lista.length };
 }
-async function aplicarCarga(l, carga, nome) { l.carga = carga; l.cargaArquivo = nome; l.cargaEm = now(); await saveLote(l); }
+async function aplicarCarga(l, carga, nome) { l.carga = carga; l.cargaArquivo = nome; l.cargaEm = now(); l.cargaPor = `${S.cfg.vendedor || '?'}${gestor() ? '' : ' (vendedor)'}`; await saveLote(l); }
 
 // ---------- carga a partir do PDF do pedido (ou da nota) do Tiny ----------
 let pdfjsPronto;
@@ -445,7 +445,7 @@ function render() {
   document.documentElement.dataset.theme = S.cfg.tema === 'light' ? 'light' : 'dark';
   const app = $('#app');
   const v = S.view;
-  if (!gestor() && ['novo', 'catalogo'].includes(v)) S.view = 'home';
+  if (!gestor() && v === 'catalogo') S.view = 'home';
   if (S.view === 'lote' && !gestor() && !ABAS_VENDEDOR.includes(S.tab)) S.tab = 'vender';
   if (S.view === 'home') app.innerHTML = vHome();
   else if (S.view === 'novo') app.innerHTML = vNovo();
@@ -466,11 +466,11 @@ function vHome() {
   return topo(null, 'PDV Shows', false, `<button class="iconbtn" data-a="ir" data-v="config" aria-label="Configurações">⚙</button>`) + `<main>
   ${semCfg ? `<div class="warn">Antes do primeiro show: em ⚙ informe seu nome e o nome deste caixa.</div>` : ''}
   ${!S.cfg.pinHash ? `<div class="warn">Sem PIN de gestor: qualquer pessoa acessa tudo. Defina o PIN em ⚙ para o modo vendedor (só venda, bonificação e contagem).</div>` : ''}
-  ${gestor() ? `<button class="btn primary block" data-a="ir" data-v="novo" style="margin-bottom:12px">+ Novo lote de show</button>
-  <div class="grid2" style="margin-bottom:16px">
+  <button class="btn primary block" data-a="ir" data-v="novo" style="margin-bottom:12px">+ Novo lote de show</button>
+  ${gestor() ? `<div class="grid2" style="margin-bottom:16px">
     <button class="btn" data-a="ir" data-v="catalogo">Catálogo (${S.produtos.size})</button>
     <button class="btn" data-a="importarCaixa">Receber arquivo</button>
-  </div>` : `<p class="muted small">Modo vendedor: abra o lote do show. Para criar lote ou importar arquivos, toque em "👤 vendedor" e entre com o PIN do gestor.</p>`}
+  </div>` : `<p class="muted small">Modo vendedor: crie o lote ou abra o do show. Catálogo e recebimento de arquivos são do gestor.</p>`}
   ${lotes.length ? lotes.map(l => { const r = resumo(l); const sh = l.shows || [];
     return `<button class="card" style="width:100%;text-align:left" data-a="abrirLote" data-id="${l.id}">
       <div class="row"><b class="grow">${l.pedido ? 'Pedido ' + esc(l.pedido) : 'Lote sem pedido'}</b><span class="pill ${l.status}">${l.status}</span></div>
@@ -590,13 +590,12 @@ function vLote() {
     <main>${body}</main>${S.tab === 'vender' && !fechado ? cartBar() : ''}`;
 }
 function tVender(l) {
-  if (!Object.keys(l.carga || {}).length && !gestor()) return `<div class="card"><h2>Falta a carga deste lote</h2><p class="muted small">O gestor precisa importar o pedido "Shows e Eventos" antes das vendas. Toque em "👤 vendedor" para entrar com o PIN.</p></div>`;
   if (!Object.keys(l.carga || {}).length) return `<div class="card"><h2>Falta a carga deste lote</h2>
     <p class="muted small">A carga é o que foi retirado do estoque no pedido "Shows e Eventos". A venda só mostra esses itens. Sem carga, o app não controla o saldo.</p>
     <label class="btn primary block">Importar pedido do Tiny (CSV)<input type="file" accept=".csv,.xls,.xlsx" class="hide" data-in="carga"></label>
     <p class="muted small">No Tiny: Vendas › Pedidos de venda › marque o pedido "Shows e Eventos" › Exportar. O app lê SKU, quantidade e o preço de show do pedido.</p>
     <label class="btn block">Importar PDF do pedido ou da nota<input type="file" accept=".pdf,application/pdf" class="hide" data-in="carga"></label>
-    <button class="btn block" style="margin-top:10px" data-a="contarCarga">Contar a carga no app</button></div>`;
+    <button class="btn block" style="margin-top:10px" data-a="contarCarga">Contar a carga no app${gestor() ? '' : ' (gestor)'}</button></div>`;
   const aviso = alertaData(l);
   const sd = saldos(l); const noCart = {}; S.cart.forEach(c => noCart[c.sku] = (noCart[c.sku] || 0) + c.qtd);
   let ps = [...S.produtos.values()]; if (!S.todoCatalogo) ps = ps.filter(p => sd[p.sku]?.carga);
@@ -927,7 +926,7 @@ function shShow() {
   <p class="muted small">As vendas entram no show marcado. Troque ao chegar na próxima cidade; a carga continua a mesma do lote.</p>
   ${(l.shows || []).map(s => `<button class="card" style="width:100%;text-align:left;${at && at.id === s.id ? 'border:2px solid var(--orange)' : ''}" data-a="usarShow" data-id="${s.id}"><div class="row"><b class="grow">${at && at.id === s.id ? '📍 ' : ''}${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</b>${at && at.id === s.id ? '<span class="pill aberto">ATUAL</span>' : ''}</div><div class="muted small">${esc(s.evento || '')}</div></button>`).join('')}
   <button class="btn block" style="margin-bottom:12px" data-a="exportarCaixa">Enviar minhas vendas (caixa) para o principal</button>
-  ${l.status === 'aberto' && gestor() ? `<form data-f="novoShow" class="card"><h2>Adicionar show</h2>
+  ${l.status === 'aberto' ? `<form data-f="novoShow" class="card"><h2>Adicionar show</h2>
     <label class="f">Cidade<input class="i" name="cidade" required></label>
     <div class="grid2"><label class="f">UF<select class="i" name="uf" required><option value="">--</option>${UFS.map(u => `<option ${at && at.uf === u ? 'selected' : ''}>${u}</option>`).join('')}</select></label><label class="f">Data<input class="i" type="date" name="data" value="${dataNoite()}" required></label></div>
     <label class="f">Evento / local<input class="i" name="evento"></label><button class="btn primary block">Adicionar e usar</button></form>` : ''}`;
@@ -1158,7 +1157,6 @@ document.addEventListener('submit', async ev => {
     const l = { id: uid(), pedido: fd.get('pedido').trim(), resp: fd.get('resp').trim(), equipe: fd.get('equipe').trim(), shows, showAtual: shows[0].id, carga: {}, retorno: {}, obsDif: {}, status: 'aberto', criado: now(), seq: 0 };
     S.lotes.push(l); await saveLote(l); S.loteId = l.id; S.view = 'lote'; S.tab = 'vender'; render();
   }
-  if (k === 'novoShow' && !gestor()) { if (!(await entrarGestor())) return; }
   if (k === 'novoShow') { const l = lote(); const sh = { id: uid(), cidade: fd.get('cidade').trim(), uf: fd.get('uf'), data: fd.get('data'), evento: fd.get('evento').trim() }; l.shows.push(sh); l.showAtual = sh.id; await saveLote(l); S.sheet = null; render(); toast(`Agora vendendo em ${sh.cidade}/${sh.uf}`); }
   if (k === 'mov') salvarMov(fd);
   if (k === 'despesa') { const l = lote(); const d = { id: uid(), cat: fd.get('cat'), showId: fd.get('showId') || '', tipo: fd.get('tipo'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: S.cfg.vendedor, ts: now() };
@@ -1193,7 +1191,9 @@ document.addEventListener('change', async ev => {
     if (t.dataset.in === 'outroValor') F.f.outros[+t.dataset.i].valor = num(t.value);
     await saveLote(l); render(); return; }
   const f = t.files && t.files[0]; if (!f) return;
-  if (!gestor()) { t.value = ''; toast('Importação é função do gestor', null, true); entrarGestor(); return; }
+  // vendedor importa só a primeira carga do lote (pedido do Tiny); trocar carga e os demais arquivos são do gestor
+  const cargaInicial = t.dataset.in === 'carga' && lote() && !Object.keys(lote().carga || {}).length;
+  if (!gestor() && !cargaInicial) { t.value = ''; toast('Importação é função do gestor', null, true); entrarGestor(); return; }
   try {
     if (t.dataset.in === 'catalogo') { const r = await importarCatalogo(f); toast(`${r.n} SKUs importados (${r.novos} novos)`); render(); }
     if (t.dataset.in === 'carga' && /\.pdf$/i.test(f.name)) { await lerCargaPdf(f, lote()); t.value = ''; return; }
@@ -1365,7 +1365,7 @@ function relatorioHTML(l) {
   <div style="text-align:right"><b>Pedido Tiny: ${esc(l.pedido || '—')}</b><br>Emitido em ${new Date().toLocaleString('pt-BR')}${fech ? '' : '<br><b>Lote ainda não fechado</b>'}</div></div>
   <h2>Lote</h2><table><tr><td class="l">Shows</td><td class="l">${(l.shows || []).map(s => `${esc(s.cidade)}/${s.uf} (${fmtD(s.data)}${s.evento ? ', ' + esc(s.evento) : ''})`).join('; ')}</td></tr>
   <tr><td class="l">Responsável / equipe</td><td class="l">${esc(l.resp)}${l.equipe ? ' · ' + esc(l.equipe) : ''}</td></tr>
-  <tr><td class="l">Carga</td><td class="l">${Object.values(l.carga || {}).reduce((a, b) => a + b, 0)} peças · ${esc(l.cargaArquivo || (l.cargaManual ? 'contada no app' : '—'))}</td></tr>
+  <tr><td class="l">Carga</td><td class="l">${Object.values(l.carga || {}).reduce((a, b) => a + b, 0)} peças · ${esc(l.cargaArquivo || (l.cargaManual ? 'contada no app' : '—'))}${l.cargaPor ? ' · importada por ' + esc(l.cargaPor) : ''}</td></tr>
   ${fech ? `<tr><td class="l">Fechamento</td><td class="l">${fmtDT(l.fechadoEm)} · conferido por ${esc(l.fechadoPor)}</td></tr>` : ''}
   ${(l.historico || []).map(h => `<tr><td class="l">${h.acao === 'destravou vendas' || !h.acao ? 'Contagem destravada' : esc(titulo(h.acao))}</td><td class="l">${fmtDT(h.ts)} · ${esc(h.quem)} · ${esc(h.motivo)}${h.contadosApagados ? ` · ${h.contadosApagados} SKUs de contagem apagados` : ''}</td></tr>`).join('')}</table>
   <h2>Resumo</h2><div class="k"><div><b>${brl(r.liq)}</b>vendas líquidas</div><div><b>${r.n}</b>vendas (${r.canc} canceladas)</div><div><b>${r.pecas}</b>peças vendidas</div><div><b>${brl(r.ticket)}</b>ticket médio</div></div>
