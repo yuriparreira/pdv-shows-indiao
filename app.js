@@ -395,7 +395,7 @@ function vLote() {
   const sh = showAtual(l); const fechado = l.status !== 'aberto';
   const tabs = [['vender', 'Vender'], ['vendas', 'Vendas'], ['movs', 'Bonificações'], ['contagem', 'Contagem'], ['relatorio', 'Relatório']];
   let body = '';
-  if (S.tab === 'vender') body = fechado ? `<div class="warn">${l.status === 'fechado' ? 'Lote fechado. Veja o Relatório.' : 'Vendas travadas para a contagem. Termine a contagem na aba Contagem.'}</div>` : tVender(l);
+  if (S.tab === 'vender') body = fechado ? `<div class="warn">${l.status === 'fechado' ? 'Lote fechado. Veja o Relatório.' : 'Vendas travadas para a contagem. Termine a contagem na aba Contagem.'}</div>${l.status === 'contagem' ? '<button class="btn block" data-a="destravar">Destravar vendas (zera a contagem)</button>' : ''}` : tVender(l);
   if (S.tab === 'vendas') body = tVendas(l);
   if (S.tab === 'movs') body = tMovs(l);
   if (S.tab === 'contagem') body = tContagem(l);
@@ -467,7 +467,8 @@ function tContagem(l) {
   const mods = agrupar(skus.map(s => S.produtos.get(s) || { sku: s, descricao: s, var: {} }));
   if (l.status === 'fechado' || S.contagemRevelada) return divergencias(l, sd);
   return `<div class="card"><h2>Contagem de retorno (às cegas)</h2><p class="muted small">Conte o que voltou para a caixa, peça por peça. O app não mostra o esperado durante a contagem, para não influenciar. SKU sem número = não contado.</p>
-  <div class="row"><span class="grow">${contados} de ${skus.length} SKUs contados</span>${l.status === 'aberto' ? `<button class="btn" style="min-height:44px" data-a="iniciarContagem">Travar vendas</button>` : '<span class="pill contagem">vendas travadas</span>'}</div></div>
+  <div class="row"><span class="grow">${contados} de ${skus.length} SKUs contados</span>${l.status === 'aberto' ? `<button class="btn" style="min-height:44px" data-a="iniciarContagem">Travar vendas</button>` : '<span class="pill contagem">vendas travadas</span>'}</div>
+  ${l.status === 'contagem' ? `<button class="btn block" style="margin-top:10px;min-height:48px" data-a="destravar">Destravar vendas (zera a contagem)</button>` : ''}</div>
   ${mods.map(m => `<div class="card"><div class="row" style="margin-bottom:6px">${foto(m.img, 'thumb lg')}<h2 class="grow" style="margin:0">${esc(m.nome)}</h2></div>${m.skus.sort((a, b) => (a.var?.Cor || '').localeCompare(b.var?.Cor || '') || tamIdx(a.var?.Tamanho) - tamIdx(b.var?.Tamanho)).map(p => `<div class="line">
     ${foto(p.img || m.img, 'thumb')}<div class="grow"><div style="font-weight:700">${esc([p.var?.Cor, p.var?.Tamanho].filter(Boolean).join(' · ') || p._rot || p.sku)}</div><div class="muted small">${esc(p.sku)}</div></div>
     <div class="stepper"><button data-a="ret" data-s="${esc(p.sku)}" data-d="-1">−</button><input inputmode="numeric" data-in="ret" data-s="${esc(p.sku)}" value="${ret[p.sku] ?? ''}" placeholder="–"><button data-a="ret" data-s="${esc(p.sku)}" data-d="1">+</button></div></div>`).join('')}</div>`).join('')}
@@ -491,6 +492,7 @@ function divergencias(l, sd) {
   <div class="card tw"><table class="t"><thead><tr><th>SKU</th><th>Carga</th><th>Vend.</th><th>Bonif.</th><th>Esper.</th><th>Cont.</th><th>Dif.</th></tr></thead><tbody>
   ${linhas.sort((a, b) => a.dif - b.dif || a.s.localeCompare(b.s)).map(x => `<tr><td>${esc(x.s)}</td><td>${x.carga}</td><td>${x.vendido}</td><td>${x.mov}</td><td>${x.saldo}</td><td>${x.ret ?? '–'}</td><td class="${x.dif < 0 ? 'neg' : x.dif > 0 ? 'pos' : 'zerot'}">${x.dif > 0 ? '+' : ''}${x.dif}</td></tr>`).join('')}
   </tbody></table></div>
+  ${l.status === 'contagem' ? `<button class="btn block" style="margin-bottom:10px;min-height:48px" data-a="destravar">Destravar vendas (zera a contagem)</button>` : ''}
   ${l.status !== 'fechado' ? `<div class="grid2"><button class="btn" data-a="recontar">Voltar e recontar</button><button class="btn ok" data-a="fecharLote">Fechar lote</button></div>` : `<div class="muted small">Lote fechado em ${fmtDT(l.fechadoEm)} por ${esc(l.fechadoPor)}.</div>`}`;
 }
 function tabelaGrupo(o, titulo, comTaxa = true) {
@@ -705,6 +707,13 @@ const A = {
   ret: async e => { const l = lote(); if (l.status === 'aberto') { toast('Primeiro toque em "Travar vendas"', null, true); return; } l.retorno ||= {}; const s = e.dataset.s; l.retorno[s] = Math.max(0, (l.retorno[s] || 0) + +e.dataset.d); await saveLote(l); const inp = document.querySelector(`input[data-in=ret][data-s="${CSS.escape(s)}"]`); if (inp) inp.value = l.retorno[s]; vibrate(10); },
   revelar: () => { const l = lote(); if (l.status === 'aberto') { toast('Primeiro toque em "Travar vendas"', null, true); return; } S.contagemRevelada = true; render(); window.scrollTo(0, 0); },
   recontar: () => { S.contagemRevelada = false; render(); },
+  destravar: async () => { const l = lote(); if (l.status !== 'contagem') return;
+    const n = Object.keys(l.retorno || {}).length;
+    const m = await perguntar({ titulo: 'Destravar as vendas?', texto: `O lote volta a aceitar vendas e a contagem é zerada${n ? ` (${n} SKUs já contados serão apagados)` : ''}. Use se travou por engano ou se ainda vai vender.`, ph: 'motivo (obrigatório)', obrig: true, ok: 'Destravar e zerar', perigo: true, chips: ['Travou por engano', 'Ainda vai vender', 'Recomeçar a contagem'] });
+    S.sheet = null; if (!m) return render();
+    (l.historico ||= []).push({ ts: now(), acao: 'destravou vendas', motivo: m, quem: S.cfg.vendedor, contadosApagados: n });
+    l.status = 'aberto'; l.retorno = {}; l.obsDif = {}; await saveLote(l);
+    S.contagemRevelada = false; S.tab = 'vender'; render(); toast('Vendas destravadas e contagem zerada'); },
   obsChip: async e => { const l = lote(); l.obsDif ||= {}; const s = e.dataset.s; const atual = l.obsDif[s] || ''; l.obsDif[s] = atual && !atual.includes(e.dataset.v) ? atual + '; ' + e.dataset.v : e.dataset.v; await saveLote(l); render(); },
   esgotados: () => { S.esgotados = !S.esgotados; render(); },
   maisShow: () => { const box = $('#shows'); const bl = box.querySelectorAll('.showbloco'); const ult = bl[bl.length - 1];
@@ -914,7 +923,8 @@ function relatorioHTML(l) {
   <h2>Lote</h2><table><tr><td class="l">Shows</td><td class="l">${(l.shows || []).map(s => `${esc(s.cidade)}/${s.uf} (${fmtD(s.data)}${s.evento ? ', ' + esc(s.evento) : ''})`).join('; ')}</td></tr>
   <tr><td class="l">Responsável / equipe</td><td class="l">${esc(l.resp)}${l.equipe ? ' · ' + esc(l.equipe) : ''}</td></tr>
   <tr><td class="l">Carga</td><td class="l">${Object.values(l.carga || {}).reduce((a, b) => a + b, 0)} peças · ${esc(l.cargaArquivo || (l.cargaManual ? 'contada no app' : '—'))}</td></tr>
-  ${fech ? `<tr><td class="l">Fechamento</td><td class="l">${fmtDT(l.fechadoEm)} · conferido por ${esc(l.fechadoPor)}</td></tr>` : ''}</table>
+  ${fech ? `<tr><td class="l">Fechamento</td><td class="l">${fmtDT(l.fechadoEm)} · conferido por ${esc(l.fechadoPor)}</td></tr>` : ''}
+  ${(l.historico || []).map(h => `<tr><td class="l">Contagem destravada</td><td class="l">${fmtDT(h.ts)} · ${esc(h.quem)} · ${esc(h.motivo)}${h.contadosApagados ? ` · ${h.contadosApagados} SKUs de contagem apagados` : ''}</td></tr>`).join('')}</table>
   <h2>Resumo</h2><div class="k"><div><b>${brl(r.liq)}</b>vendas líquidas</div><div><b>${r.n}</b>vendas (${r.canc} canceladas)</div><div><b>${r.pecas}</b>peças vendidas</div><div><b>${brl(r.ticket)}</b>ticket médio</div></div>
   <p>Bruto ${brl(r.bruto)} · descontos ${brl(r.desc)} · bonificações ${soma(bonif, x => x.mov)} peças · perdas na contagem ${soma(perdas, x => x.perda)} peças · sobras ${soma(sobras, x => x.sobra)} peças</p>
 
