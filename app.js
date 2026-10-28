@@ -686,6 +686,11 @@ function tFinanceiro(l) {
     <div class="kpi"><b>${brl(F.r.liq)}</b><span>lançado no PDV</span></div><div class="kpi"><b>${brl(F.realTotal)}</b><span>recebido de verdade</span></div>
     <div class="kpi"><b class="${Math.abs(F.dif) < .01 ? 'zerot' : 'neg'}">${brl(F.dif)}</b><span>diferença</span></div><div class="kpi"><b class="${Math.abs(F.pendente) < .01 ? 'zerot' : 'neg'}">${brl(F.pendente)}</b><span>sem justificativa</span></div></div>
     ${F.faltaInformar.length ? `<div class="warn" style="margin-top:12px">Falta informar: ${F.faltaInformar.join(', ')}.</div>` : ''}</div>
+  ${(() => { const a = analiseInfinite(l); if (!a || fe) return ''; const usados = new Set(F.f.ajustes.map(x => x.txId).filter(Boolean));
+    const lst = a.semPdv.filter(t => !usados.has(t.id + t.t)); if (!lst.length) return '';
+    return `<div class="card"><h2>Do extrato: pagamentos sem venda no app</h2>
+    <p class="muted small">Entraram na InfinitePay e não têm venda lançada. Se foram vendas, lance como "venda não registrada" e escolha a peça que faltou na contagem: ela sai da perda e entra no pedido de venda.</p>
+    ${lst.map(t => `<div class="line"><div class="grow"><b>${brl(t.valor)}</b> · ${FORMA[t.forma]}${t.parc > 1 ? ' ' + t.parc + 'x' : ''}<div class="muted small">${fmtDT(t.t)} · ${esc(t.term)}</div></div><button class="btn" style="min-height:44px" data-a="ajusteDeTx" data-tx="${esc(t.id + t.t)}">Justificar</button></div>`).join('')}</div>`; })()}
   <div class="card"><h2>3. Justificativas</h2>
     <p class="muted small">Toda diferença precisa de explicação. Desconto não lançado, venda não registrada, preço errado e estorno mudam o valor da venda. Quebra de caixa e "outro" ficam como ajuste à parte. Forma trocada só explica diferença entre formas.</p>
     ${F.f.ajustes.map((a, i) => `<div class="line"><div class="grow"><b>${esc(CAT_AJ[a.cat]?.nome || a.cat)}</b><div class="muted small">${a.sku ? esc(a.sku) + ' · ' + a.qtd + ' pç · ' : ''}${esc(a.obs || '')}${CAT_AJ[a.cat]?.venda ? ' · muda a venda' : ''}</div></div><b class="${a.dir === 'menos' ? 'neg' : 'pos'}">${CAT_AJ[a.cat]?.neutro ? '' : a.dir === 'menos' ? '−' : '+'}${brl(a.valor)}</b>${fe ? '' : `<button class="iconbtn" data-a="rmAjuste" data-i="${i}">✕</button>`}</div>`).join('') || '<div class="muted small">Nenhuma ainda.</div>'}
@@ -711,9 +716,9 @@ function tRelatorio(l) {
   ${l.status !== 'fechado' ? '<div class="warn">O relatório final sai depois da contagem e do fechamento. Antes disso, é parcial.</div>' : ''}
   <button class="btn primary block" data-a="pdf">Gerar PDF ${l.status === 'fechado' ? 'final' : 'parcial'}</button>
   <div class="card" style="margin-top:12px"><h2>Arquivos para importar no Tiny</h2>
-  <p class="muted small">No layout de importação de pedidos. Bonificação e perda vão em pedidos separados, valorizados a custo, para não mexer no preço médio da venda.</p>
+  <p class="muted small">No layout de importação de pedidos. Bonificação e perda vão em pedidos separados, valorizados a custo, para não mexer no preço médio da venda. Ordem: contagem física (fechar lote) › conferência financeira › venda e perda.</p>
   <button class="btn block" data-a="tinyCsv" data-t="venda">Pedido de venda (só o vendido)</button>
-  <div class="grid2" style="margin-top:10px"><button class="btn" data-a="tinyCsv" data-t="bonif">Bonificação<br><small>CFOP ${esc(S.cfg.cfopBonif)}</small></button><button class="btn" data-a="tinyCsv" data-t="perda" ${l.status !== 'fechado' ? 'style="opacity:.5"' : ''}>Perda<br><small>CFOP ${esc(S.cfg.cfopPerda)}</small></button></div></div>
+  <div class="grid2" style="margin-top:10px"><button class="btn" data-a="tinyCsv" data-t="bonif">Bonificação<br><small>CFOP ${esc(S.cfg.cfopBonif)}</small></button><button class="btn" data-a="tinyCsv" data-t="perda" ${l.status !== 'fechado' || !fin(l).f.concluido ? 'style="opacity:.5"' : ''}>Perda<br><small>CFOP ${esc(S.cfg.cfopPerda)}</small></button></div></div>
   <div class="grid2" style="margin-top:10px"><button class="btn" data-a="csvTiny">Planilha de conferência</button><button class="btn" data-a="exportarCaixa">Enviar caixa</button></div>
   <p class="muted small">"Enviar caixa" gera um arquivo com as vendas deste aparelho. No caixa principal, use "Receber caixa" na tela inicial para juntar.</p>`;
 }
@@ -808,11 +813,12 @@ function shAjuste() {
   <form data-f="ajuste">
   <label class="f">Motivo<select class="i" name="cat" data-in="ajCat">${CATS_AJ.map(c => `<option value="${c.id}" ${c.id === cat.id ? 'selected' : ''}>${c.nome}</option>`).join('')}</select></label>
   ${cat.neutro ? '<p class="muted small">Só explica diferença entre formas (ex.: lançou Pix e foi débito). Não entra na soma.</p>' : `<label class="f">Efeito<select class="i" name="dir"><option value="mais" ${(cat.dir || (F.pendente >= 0 ? 'mais' : 'menos')) === 'mais' ? 'selected' : ''}>Entrou a mais que o lançado</option><option value="menos" ${(cat.dir || (F.pendente >= 0 ? 'mais' : 'menos')) === 'menos' ? 'selected' : ''}>Entrou a menos que o lançado</option></select></label>`}
-  <label class="f">Valor (R$)<input class="i" name="valor" inputmode="decimal" required value="${Math.abs(F.pendente) >= .01 && !cat.neutro ? String(Math.abs(F.pendente).toFixed(2)).replace('.', ',') : ''}"></label>
+  <label class="f">Valor (R$)<input class="i" name="valor" inputmode="decimal" required value="${st.valor ? String(st.valor.toFixed(2)).replace('.', ',') : Math.abs(F.pendente) >= .01 && !cat.neutro ? String(Math.abs(F.pendente).toFixed(2)).replace('.', ',') : ''}"></label>
+  ${st.txId ? `<input type="hidden" name="txId" value="${esc(st.txId)}">` : ''}
   ${cat.sku && l.perdaExportada ? `<p class="small warn">A nota de perda já foi gerada em ${fmtDT(l.perdaExportada.ts)}: a peça continua na perda e o valor entra na venda por rateio.</p>` : ''}
   ${cat.sku && !l.perdaExportada ? `<div class="grid2"><label class="f">Peça que faltou (opcional)<select class="i" name="sku"><option value="">—</option>${faltas.map(([s, q]) => `<option value="${esc(s)}">${esc(s)} (faltam ${q})</option>`).join('')}</select></label><label class="f">Quantidade<input class="i" name="qtd" inputmode="numeric" value="1"></label></div>
     <p class="muted small">Com a peça informada, ela sai da perda e entra no pedido de venda.</p>` : ''}
-  <label class="f">Observação<input class="i" name="obs" placeholder="ex.: 2 bonés por R$ 200 no fim do show" ${cat.id === 'outro' ? 'required' : ''}></label>
+  <label class="f">Observação<input class="i" name="obs" value="${esc(st.obs || '')}" placeholder="ex.: 2 bonés por R$ 200 no fim do show" ${cat.id === 'outro' ? 'required' : ''}></label>
   <button class="btn ok block">Lançar justificativa</button></form>`;
 }
 function shTexto() {
@@ -913,6 +919,8 @@ const A = {
   dataCerta: async e => { const l = lote(); showAtual(l).dataConferida = e.dataset.d; await saveLote(l); render(); },
   addOutro: async () => { const l = lote(); fin(l).f.outros.push({ nome: '', valor: 0 }); await saveLote(l); render(); },
   rmOutro: async e => { const l = lote(); fin(l).f.outros.splice(+e.dataset.i, 1); await saveLote(l); render(); },
+  ajusteDeTx: e => { const a = analiseInfinite(lote()); const t = a?.semPdv.find(x => x.id + x.t === e.dataset.tx); if (!t) return;
+    S.sheet = { k: 'ajuste', cat: 'venda_nr', valor: t.valor, obs: `${FORMA[t.forma]} ${fmtDT(t.t)} · ${t.term}`, txId: e.dataset.tx }; renderSheet(); },
   novoAjuste: () => { S.sheet = { k: 'ajuste', cat: fin(lote()).pendente < 0 ? 'desconto' : 'venda_nr' }; renderSheet(); },
   rmAjuste: async e => { const l = lote(); fin(l).f.ajustes.splice(+e.dataset.i, 1); await saveLote(l); render(); },
   concluirFin: async () => { const l = lote(); const F = fin(l); if (!F.pronto) return;
@@ -987,6 +995,7 @@ document.addEventListener('submit', async ev => {
   if (k === 'mov') salvarMov(fd);
   if (k === 'ajuste') { const l = lote(); const cat = CAT_AJ[fd.get('cat')]; const a = { id: uid(), cat: cat.id, dir: cat.neutro ? 'mais' : fd.get('dir'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: S.cfg.vendedor, ts: now() };
     if (cat.sku && fd.get('sku')) { a.sku = fd.get('sku'); a.qtd = Math.max(1, Math.round(num(fd.get('qtd')))); }
+    if (fd.get('txId')) a.txId = fd.get('txId');
     if (!a.valor) { toast('Informe o valor', null, true); return; }
     fin(l).f.ajustes.push(a); await saveLote(l); S.sheet = null; render(); toast('Justificativa lançada'); }
 });
@@ -1002,7 +1011,7 @@ document.addEventListener('input', async ev => {
 });
 document.addEventListener('change', async ev => {
   const t = ev.target;
-  if (t.dataset.in === 'ajCat') { S.sheet = { k: 'ajuste', cat: t.value }; renderSheet(); return; }
+  if (t.dataset.in === 'ajCat') { S.sheet = { ...S.sheet, k: 'ajuste', cat: t.value }; renderSheet(); return; }
   if (['finReal', 'outroNome', 'outroValor'].includes(t.dataset.in)) { const l = lote(); const F = fin(l);
     if (t.dataset.in === 'finReal') { if (t.value.trim() === '') delete F.f.real[t.dataset.f]; else F.f.real[t.dataset.f] = num(t.value); }
     if (t.dataset.in === 'outroNome') F.f.outros[+t.dataset.i].nome = t.value.trim();
@@ -1105,6 +1114,8 @@ function csvTiny(l) {
 const CAB_TINY = ['ID', 'Número do pedido', 'Data', 'Data prevista', 'ID contato', 'Nome do contato*', 'Tipo de Pessoa', 'CPF/CNPJ', 'RG/IE', 'CEP', 'Município', 'UF', 'Endereço', 'Endereço Nro', 'Complemento', 'Bairro', 'Fone', 'Celular', 'e-mail', 'Desconto pedido (% ou valor)', 'Frete', 'Observações', 'Situação', 'ID produto', 'Descrição', 'Quantidade', 'Valor unitário', 'Desconto item %', 'Código de rastreamento', 'Número da ordem de compra', 'Vendedor', 'Despesas', 'Desconto do pedido rateado', 'Frete pedido rateado', 'Despesas pedido rateado', 'Destinatário', 'CPF/CNPJ entrega', 'CEP entrega', 'Município entrega', 'UF entrega', 'Endereço entrega', 'Endereço Nro entrega', 'Complemento entrega', 'Bairro entrega', 'Fone entrega', 'Código (SKU)'];
 function csvTinyPedido(l, tipo) {
   if (tipo === 'perda' && l.status !== 'fechado') { toast('A perda sai depois da contagem física: feche o lote na aba Contagem', null, true); S.tab = 'contagem'; render(); return; }
+  // a perda é o que continua faltando depois da auditoria de vendas: venda achada no extrato tira a peça da perda
+  if (tipo === 'perda' && !fin(l).f.concluido) { toast('A perda sai depois da conferência financeira: vendas achadas no extrato ainda podem tirar peças da perda', null, true); S.tab = 'financeiro'; render(); return; }
   if (tipo === 'venda' && !fin(l).f.concluido) { toast('Conclua a conferência financeira antes de gerar a venda', null, true); S.tab = 'financeiro'; render(); return; }
   const sd = saldos(l); const ret = l.retorno || {}; const c = l.contatoTiny || { nome: 'Shows e Eventos' }; const aj = baixasAjustadas(l);
   const br = v => (Math.round(v * 100) / 100).toFixed(2).replace('.', ',');
