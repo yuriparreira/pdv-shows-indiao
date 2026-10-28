@@ -31,7 +31,8 @@ const DB = {
   db: null,
   open() {
     return new Promise((res, rej) => {
-      const r = indexedDB.open('pdv-shows-indiao', 1);
+      const extra = new URLSearchParams(location.search).get('db');
+      const r = indexedDB.open('pdv-shows-indiao' + (extra ? '-' + extra.replace(/\W/g, '') : ''), 1);
       r.onupgradeneeded = () => {
         const d = r.result;
         d.createObjectStore('produtos', { keyPath: 'sku' });
@@ -365,9 +366,11 @@ function vCatalogo() {
   <div class="card"><h2>Tabela de preços "Shows e Eventos"</h2>
   <p class="muted small">O preço de venda no show vem desta tabela (ou do pedido do lote), não do preço fixo do ERP. Aceita a exportação da lista de preços do Tiny ou qualquer planilha com SKU e preço. ${Object.keys(S.tabela).length ? `${Object.keys(S.tabela).length} SKUs na tabela${S.tabelaInfo ? ' · ' + esc(S.tabelaInfo.arq) + ' · ' + fmtDT(S.tabelaInfo.em) : ''}.` : '<b>Nenhuma tabela importada.</b>'}</p>
   <label class="btn primary block">Importar tabela Shows e Eventos<input type="file" accept=".csv,.xls,.xlsx" class="hide" data-in="tabela"></label></div>
-  <div class="card"><h2>Preço de show por modelo</h2><p class="muted small">Toque no preço para mudar. Vale para todas as cores e tamanhos do modelo. Vazio = preço do Tiny.</p>
-  ${mods.map(m => `<div class="line"><div class="grow"><div style="font-weight:600">${esc(m.nome)}</div><div class="muted small">${m.skus.length} SKUs · Tiny ${brl(m.preco)}</div></div>
-    <button class="btn" data-a="precoModelo" data-m="${esc(m.id)}">${m.precoShow ? brl(m.precoShow) : '—'}</button></div>`).join('') || '<div class="empty">Importe o catálogo.</div>'}
+  <div class="card"><h2>Preço de venda no show, por modelo</h2>
+  <p class="muted small">Mostra o preço que o vendedor vai cobrar e de onde ele vem. <b>Tabela</b> = Shows e Eventos; <b>manual</b> = digitado aqui; <b class="neg">ERP</b> = sem preço de show (usa o preço fixo do Tiny). Toque para digitar um preço manual.</p>
+  ${(() => { const sem = mods.filter(m => fontePreco(m.skus[0])[0] === 'erp').length; return sem && Object.keys(S.tabela).length ? `<div class="warn">${sem} modelos sem preço na tabela Shows e Eventos (aparecem com ERP).</div>` : ''; })()}
+  ${mods.map(m => { const [fonte, pr] = fontePreco(m.skus[0]); return `<div class="line"><div class="grow"><div style="font-weight:600">${esc(m.nome)}</div><div class="muted small">${m.skus.length} SKUs · ERP ${brl(m.preco)}</div></div>
+    <button class="btn" style="min-width:120px;flex-direction:column;gap:0" data-a="precoModelo" data-m="${esc(m.id)}">${pr ? brl(pr) : '—'}<small class="${fonte === 'erp' ? 'neg' : 'muted'}" style="font-size:11px">${{ tabela: 'tabela', manual: 'manual', erp: 'ERP', pedido: 'pedido' }[fonte]}</small></button></div>`; }).join('') || '<div class="empty">Importe o catálogo.</div>'}
   </div></main>`;
 }
 function agrupar(ps) {
@@ -765,7 +768,8 @@ document.addEventListener('change', async ev => {
     if (t.dataset.in === 'catalogo') { const r = await importarCatalogo(f); toast(`${r.n} SKUs importados (${r.novos} novos)`); render(); }
     if (t.dataset.in === 'carga' && /\.pdf$/i.test(f.name)) { await lerCargaPdf(f, lote()); t.value = ''; return; }
     if (t.dataset.in === 'carga') { const r = await importarCarga(f, lote()); toast(`Carga: ${r.pecas} peças em ${r.linhas} SKUs${r.semCadastro ? ` · ${r.semCadastro} sem cadastro` : ''}`); render(); }
-    if (t.dataset.in === 'tabela') { const n = await importarTabela(f); toast(`Tabela Shows e Eventos: ${n} preços`); render(); }
+    if (t.dataset.in === 'tabela') { const n = await importarTabela(f); const batem = Object.keys(S.tabela).filter(k => S.produtos.has(k)).length;
+      toast(S.produtos.size ? `Tabela Shows e Eventos: ${n} preços · ${batem} batem com o catálogo` : `Tabela salva (${n} preços). Importe o catálogo para ver os produtos.`); render(); }
     if (t.dataset.in === 'infinite') { await lerInfinite(f, lote()); render(); }
   } catch (e) { console.error(e); toast(e.message || 'Não consegui ler o arquivo', null, true); }
   t.value = '';
