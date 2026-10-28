@@ -52,10 +52,104 @@ const DB = {
     });
   },
   all(store) { return DB.tx(store, 'readonly', s => s.getAll()); },
-  put(store, obj) { return DB.tx(store, 'readwrite', s => { s.put(obj); }); },
-  bulk(store, arr) { return DB.tx(store, 'readwrite', s => { arr.forEach(o => s.put(o)); }); },
+  put(store, obj, remoto) { if (!remoto) Sinc.marcar(store, obj); return DB.tx(store, 'readwrite', s => { s.put(obj); }); },
+  bulk(store, arr, remoto) { if (!remoto) arr.forEach(o => Sinc.marcar(store, o)); return DB.tx(store, 'readwrite', s => { arr.forEach(o => s.put(o)); }); },
   del(store, key) { return DB.tx(store, 'readwrite', s => { s.delete(key); }); },
 };
+
+// ---------- sincronização em tempo real (opcional) ----------
+// Com internet e URL configurada, cada mudança vai para a planilha Google (Apps Script) e as dos outros
+// celulares voltam a cada 15 s. Sem internet, as mudanças ficam pendentes e sobem quando o sinal voltar.
+const Sinc = {
+  st: { seq: 0, pend: {}, ultimo: null, catVer: '' }, rodando: false, erro: '', timer: null, partes: {}, cont: 0,
+  ativo() { return !!(S.cfg.sincUrl && S.cfg.sincChave); },
+  marcar(store, obj) {
+    let chave = null;
+    if (store === 'lotes') chave = 'lote:' + obj.id;
+    if (store === 'vendas' || store === 'movs') { obj.atualizado = now(); chave = (store === 'vendas' ? 'venda:' : 'mov:') + obj.id; }
+    if (store === 'meta' && obj.k === 'tabela') chave = 'tabela:atual';
+    if (store === 'produtos') { chave = 'catalogo:atual'; this.st.catVer = now(); }
+    if (!chave) return;
+    this.st.pend[chave] = ++this.cont; this.salvar();
+    clearTimeout(this.timer); this.timer = setTimeout(() => this.ciclo(), 1500);
+  },
+  salvar() { if (DB.db) DB.tx('meta', 'readwrite', s => { s.put({ k: 'sinc', v: this.st }); }); },
+  nPend() { return Object.keys(this.st.pend).length; },
+  registro(chave) {
+    const [tipo, id] = [chave.slice(0, chave.indexOf(':')), chave.slice(chave.indexOf(':') + 1)];
+    const base = { aparelho: S.cfg.aparelho };
+    if (tipo === 'lote') { const o = S.lotes.find(x => x.id === id); return o && [{ ...base, tipo, id, loteId: id, atualizado: o.atualizado || now(), json: JSON.stringify(o) }]; }
+    if (tipo === 'venda') { const o = S.vendas.find(x => x.id === id); return o && [{ ...base, tipo, id, loteId: o.loteId, atualizado: o.atualizado || o.ts, json: JSON.stringify(o) }]; }
+    if (tipo === 'mov') { const o = S.movs.find(x => x.id === id); return o && [{ ...base, tipo, id, loteId: o.loteId, atualizado: o.atualizado || o.ts, json: JSON.stringify(o) }]; }
+    if (tipo === 'tabela') { const em = S.tabelaInfo?.em || now(); return [{ ...base, tipo, id: 'atual', atualizado: em, json: JSON.stringify({ v: S.tabela, em, arq: S.tabelaInfo?.arq || '' }) }]; }
+    if (tipo === 'catalogo') { // a célula da planilha aceita 50 mil caracteres: o catálogo vai em partes de 30 mil (folga para o escape do JSON)
+      const ver = this.st.catVer || now(); const txt = JSON.stringify([...S.produtos.values()].map(({ _rot, ...p }) => p)); const tam = 30000; const n = Math.ceil(txt.length / tam) || 1;
+      return Array.from({ length: n }, (_, i) => ({ ...base, tipo: 'catalogo', id: 'parte' + i, atualizado: ver, json: JSON.stringify({ ver, i, n, txt: txt.slice(i * tam, (i + 1) * tam) }) }));
+    }
+    return null;
+  },
+  async enviar() {
+    const chaves = Object.keys(this.st.pend); if (!chaves.length) return;
+    const fila = []; chaves.forEach(c => { const r = this.registro(c); if (r) r.forEach(x => fila.push([c, x])); else delete this.st.pend[c]; });
+    while (fila.length) {
+      const lote = []; let tam = 0;
+      while (fila.length && (lote.length < 40) && (tam < 300000 || !lote.length)) { const it = fila.shift(); lote.push(it); tam += it[1].json.length; }
+      const marcas = Object.fromEntries(lote.map(([c]) => [c, this.st.pend[c]]));
+      const r = await fetch(S.cfg.sincUrl, { method: 'POST', body: JSON.stringify({ chave: S.cfg.sincChave, registros: lote.map(x => x[1]) }) }).then(x => x.json());
+      if (!r.ok) throw new Error(r.erro || 'falha no envio');
+      Object.entries(marcas).forEach(([c, m]) => { if (this.st.pend[c] === m && !fila.some(([cc]) => cc === c)) delete this.st.pend[c]; });
+    }
+    this.salvar();
+  },
+  async receber() {
+    let mais = true, mudou = false;
+    while (mais) {
+      const u = `${S.cfg.sincUrl}?chave=${encodeURIComponent(S.cfg.sincChave)}&desde=${this.st.seq}`;
+      const r = await fetch(u).then(x => x.json()); if (!r.ok) throw new Error(r.erro || 'falha ao receber');
+      for (const reg of r.registros) if (reg.aparelho !== S.cfg.aparelho && await this.aplicar(reg)) mudou = true;
+      this.st.seq = r.seq; mais = r.mais;
+    }
+    this.salvar(); return mudou;
+  },
+  async aplicar(reg) {
+    const o = JSON.parse(reg.json); const t = reg.tipo;
+    const lista = t === 'lote' ? S.lotes : t === 'venda' ? S.vendas : t === 'mov' ? S.movs : null;
+    if (lista) {
+      if (this.st.pend[t + ':' + o.id]) return false; // alteração local ainda não enviada: a local vence e sobe depois
+      const i = lista.findIndex(x => x.id === o.id); const loc = lista[i];
+      if (loc && String(loc.atualizado || '') >= String(o.atualizado || '')) return false;
+      if (t === 'lote' && loc) (loc.shows || []).forEach(s => { if (!(o.shows || []).find(x => x.id === s.id)) (o.shows ||= []).push(s); });
+      if (i < 0) lista.push(o); else lista[i] = o;
+      await DB.put(t === 'lote' ? 'lotes' : t === 'venda' ? 'vendas' : 'movs', o, true); return true;
+    }
+    if (t === 'tabela') { if (S.tabelaInfo?.em && S.tabelaInfo.em >= o.em) return false; S.tabela = o.v || {}; S.tabelaInfo = { em: o.em, arq: o.arq }; await DB.put('meta', { k: 'tabela', v: S.tabela, em: o.em, arq: o.arq }, true); return true; }
+    if (t === 'catalogo') {
+      if (this.st.catVer && this.st.catVer >= o.ver) return false;
+      const pt = this.partes[o.ver] ||= []; pt[o.i] = o.txt;
+      if (pt.filter(x => x !== undefined).length < o.n) return false;
+      const ps = JSON.parse(pt.join('')); ps.forEach(p => S.produtos.set(p.sku, p)); await DB.bulk('produtos', ps, true);
+      this.st.catVer = o.ver; S.cfg.catalogoEm = o.ver; saveCfg(); delete this.partes[o.ver]; return true;
+    }
+    return false;
+  },
+  async ciclo(forcar) {
+    if (!this.ativo() || this.rodando || (!navigator.onLine && !forcar)) return;
+    this.rodando = true;
+    try { await this.enviar(); const mudou = await this.receber(); this.erro = ''; this.st.ultimo = now(); this.salvar();
+      // não redesenha no meio de uma digitação ou com uma folha aberta
+      if (mudou && !S.sheet && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) render(); else atualizarSelo();
+    } catch (e) { this.erro = e.message || 'sem conexão'; atualizarSelo(); }
+    finally { this.rodando = false; }
+  },
+  selo() {
+    if (!this.ativo()) return navigator.onLine ? ['on', '● online'] : ['off', '● offline'];
+    const n = this.nPend();
+    if (!navigator.onLine) return ['off', `● offline${n ? ' · ' + n + ' pend.' : ''}`];
+    if (this.erro) return ['off', '● erro sinc.'];
+    return n ? ['off', `● sinc. ${n} pend.`] : ['on', '● sincronizado'];
+  },
+};
+function atualizarSelo() { const el = document.querySelector('.net'); if (!el) return; const [c, t] = Sinc.selo(); el.className = 'net ' + c; el.textContent = t; }
 
 // ---------- estado ----------
 const S = {
@@ -302,7 +396,7 @@ function render() {
 function topo(titulo, sub, voltar, extra = '') {
   return `<header class="top">${voltar ? `<button class="iconbtn" data-a="voltar" aria-label="Voltar">‹</button>` : ''}
   ${titulo === null ? `<img class="logo" src="marca/logo-negativo.svg" alt="Indião Store"><h1><span class="sub">${esc(sub)}</span></h1>` : `<h1>${esc(titulo)}${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</h1>`}${extra}
-  <span class="net ${navigator.onLine ? 'on' : 'off'}">${navigator.onLine ? '● online' : '● offline'}</span></header><div class="faixa"></div>`;
+  <span class="net ${Sinc.selo()[0]}" data-a="ir" data-v="config">${Sinc.selo()[1]}</span></header><div class="faixa"></div>`;
 }
 function vHome() {
   const lotes = [...S.lotes].sort((a, b) => (b.criado || '').localeCompare(a.criado || ''));
@@ -312,7 +406,7 @@ function vHome() {
   <button class="btn primary block" data-a="ir" data-v="novo" style="margin-bottom:12px">+ Novo lote de show</button>
   <div class="grid2" style="margin-bottom:16px">
     <button class="btn" data-a="ir" data-v="catalogo">Catálogo (${S.produtos.size})</button>
-    <button class="btn" data-a="importarCaixa">Receber caixa</button>
+    <button class="btn" data-a="importarCaixa">Receber arquivo</button>
   </div>
   ${lotes.length ? lotes.map(l => { const r = resumo(l); const sh = l.shows || [];
     return `<button class="card" style="width:100%;text-align:left" data-a="abrirLote" data-id="${l.id}">
@@ -350,10 +444,19 @@ function vConfig() {
   <label class="f">CFOP da perda de contagem<input class="i" name="cfopPerda" value="${esc(S.cfg.cfopPerda)}"></label></div>
   <div class="card"><h2>Taxas estimadas da InfinitePay (%)</h2><p class="muted small">Usadas antes de importar o extrato. Débito, crédito à vista, 2x e 3x vêm do extrato de out/26; 4x a 6x são estimativa: confirme no app da InfinitePay.</p>
   <div class="grid2">${[['debito', 'Débito'], ['c1', 'Crédito 1x'], ['c2', 'Crédito 2x'], ['c3', 'Crédito 3x'], ['c4', 'Crédito 4x'], ['c5', 'Crédito 5x'], ['c6', 'Crédito 6x']].map(([k, n]) => `<label class="f">${n}<input class="i" name="tx_${k}" inputmode="decimal" value="${String(S.cfg.taxas[k]).replace('.', ',')}"></label>`).join('')}</div></div>
+  <div class="card"><h2>Sincronização em tempo real</h2>
+  <p class="muted small">Com internet, cada venda, bonificação, lote, tabela e catálogo vai para a planilha da Indião, e as dos outros celulares chegam aqui a cada 15 s. Sem sinal, fica pendente e sobe quando voltar. Deixe em branco para usar só no aparelho.</p>
+  <label class="f">URL do servidor (Apps Script)<input class="i" name="sincUrl" value="${esc(S.cfg.sincUrl || '')}" placeholder="https://script.google.com/macros/s/…/exec" inputmode="url"></label>
+  <label class="f">Chave<input class="i" name="sincChave" value="${esc(S.cfg.sincChave || '')}" autocomplete="off"></label>
+  <p class="small ${Sinc.erro ? 'neg' : 'muted'}">${Sinc.ativo() ? (Sinc.erro ? 'Erro: ' + esc(Sinc.erro) : `Última sincronização: ${Sinc.st.ultimo ? fmtDT(Sinc.st.ultimo) : 'ainda não'} · ${Sinc.nPend()} pendentes`) : 'Desligada.'}</p>
+  ${Sinc.ativo() ? '<button type="button" class="btn block" data-a="sincAgora">Sincronizar agora</button>' : ''}</div>
   <button class="btn primary block">Salvar</button></form>
-  <div class="card" style="margin-top:16px"><h2>Armazenamento</h2><p class="muted small" id="persist">Verificando…</p>
+  <div class="card" style="margin-top:16px"><h2>Configurar outro celular</h2>
+  <p class="muted small">Gera um arquivo com o catálogo, a tabela Shows e Eventos, os lotes abertos (pedido, shows e carga) com as vendas, os CFOPs, as taxas e a sincronização. No outro celular: tela inicial › <b>Receber arquivo</b>. Vale também sem internet (WhatsApp, Bluetooth, cabo).</p>
+  <button class="btn block" data-a="enviarConfig">Enviar configuração</button></div>
+  <div class="card"><h2>Armazenamento</h2><p class="muted small" id="persist">Verificando…</p>
   <button class="btn block" data-a="backupTudo">Baixar backup completo</button></div>
-  <p class="muted small">Versão 1.0 · Os dados ficam só neste aparelho até você exportar.</p></main>`;
+  <p class="muted small">Versão 1.3 · ${Sinc.ativo() ? 'Sincronizando com a planilha da Indião quando houver internet.' : 'Os dados ficam só neste aparelho até você exportar.'}</p></main>`;
 }
 function vCatalogo() {
   const ps = [...S.produtos.values()]; const mods = agrupar(ps);
@@ -685,11 +788,11 @@ const A = {
   rmPag: e => { S.pagamentos.splice(+e.dataset.i, 1); renderSheet(); },
   dividir: async () => { const v = await perguntar({ titulo: 'Quanto vai na 1ª forma?', tipo: 'num', ok: 'OK' }); S.sheet = { k: 'pagar', parcial: v ? num(v) : null }; renderSheet(); },
   finalizar: async () => {
-    const l = lote(); const sh = showAtual(l); l.seq = (l.seq || 0) + 1;
+    const l = lote(); const sh = showAtual(l); S.cfg.seqVenda = (S.cfg.seqVenda || 0) + 1; l.seq = S.cfg.seqVenda; saveCfg();
     const v = { id: uid(), num: l.seq, loteId: l.id, showId: sh?.id, ts: now(), itens: S.cart.map(c => ({ sku: c.sku, qtd: c.qtd, preco: c.preco, ...(c.semSaldo ? { semSaldo: c.semSaldo } : {}) })),
       desconto: S.cartDesc, descMotivo: S.cartDesc ? S.cartDescMotivo : '', pagamentos: S.pagamentos.map(p => ({ forma: p.forma, valor: p.valor, ...(p.parcelas ? { parcelas: p.parcelas } : {}) })),
       troco: S.pagamentos.reduce((a, p) => a + (p.troco || 0), 0), vendedor: S.cfg.vendedor, caixa: S.cfg.caixa, aparelho: S.cfg.aparelho, status: 'ok' };
-    S.vendas.push(v); await DB.put('vendas', v); await saveLote(l);
+    S.vendas.push(v); await DB.put('vendas', v);
     const bk = { cart: S.cart, d: S.cartDesc };
     S.cart = []; S.cartDesc = 0; S.pagamentos = []; S.sheet = null; vibrate([20, 40, 20]); render();
     toast(`Venda #${v.num} registrada · ${brl(totalVenda(v).liq)}`, async () => { v.status = 'cancelada'; v.motivoCanc = 'desfeita logo após o registro'; v.canceladaEm = now(); await DB.put('vendas', v); S.cart = bk.cart; S.cartDesc = bk.d; render(); });
@@ -734,6 +837,12 @@ const A = {
   cargaManual: () => { S.sheet = { k: 'mov', tipo: '__carga' }; MOV.__carga = 'Carga'; renderSheet(); },
   precoModelo: async e => { const id = e.dataset.m; const ps = [...S.produtos.values()].filter(p => modeloDe(p) === id); const v = await perguntar({ titulo: 'Preço de show', texto: nomeModelo(ps[0]), tipo: 'num', valor: ps[0].precoShow ? String(ps[0].precoShow).replace('.', ',') : '', ph: 'vazio = preço do Tiny', ok: 'Salvar' }); S.sheet = null; if (v !== null && v !== undefined) { ps.forEach(p => p.precoShow = num(v) || 0); await DB.bulk('produtos', ps); } render(); },
   baixarFotos: () => baixarFotos(),
+  sincAgora: async () => { toast('Sincronizando…'); await Sinc.ciclo(true); toast(Sinc.erro ? 'Erro: ' + Sinc.erro : `Sincronizado · ${Sinc.nPend()} pendentes`, null, !!Sinc.erro); if (S.view === 'config') render(); },
+  enviarConfig: () => { const abertos = S.lotes.filter(l => l.status !== 'fechado'); const ids = new Set(abertos.map(l => l.id));
+    const pac = { tipo: 'pacote', versao: 1, em: now(), de: S.cfg.caixa, produtos: [...S.produtos.values()].map(({ _rot, ...p }) => p), tabela: S.tabela, tabelaInfo: S.tabelaInfo,
+      cfg: { cfopBonif: S.cfg.cfopBonif, cfopPerda: S.cfg.cfopPerda, taxas: S.cfg.taxas, sincUrl: S.cfg.sincUrl || '', sincChave: S.cfg.sincChave || '' },
+      lotes: abertos, vendas: S.vendas.filter(v => ids.has(v.loteId)), movs: S.movs.filter(m => ids.has(m.loteId)) };
+    baixar(`pdv-shows-configuracao-${today()}.json`, JSON.stringify(pac), 'application/json'); },
   backupTudo: () => baixar(`pdv-shows-backup-${today()}.json`, JSON.stringify({ tipo: 'backup', versao: 1, em: now(), produtos: [...S.produtos.values()], lotes: S.lotes, vendas: S.vendas, movs: S.movs }), 'application/json'),
 };
 
@@ -750,7 +859,13 @@ async function salvarMov(fd) {
 document.addEventListener('submit', async ev => {
   const f = ev.target; const k = f.dataset.f; if (!k) return; ev.preventDefault(); const fd = new FormData(f);
   if (k === 'texto') { const r = S.sheet.res; const v = fd.get('v'); S.sheet = null; r && r(v); return; }
-  if (k === 'cfg') { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); }); await saveCfg(); S.view = 'home'; render(); toast('Salvo'); }
+  if (k === 'cfg') { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
+    const urlAntes = S.cfg.sincUrl; S.cfg.sincUrl = (fd.get('sincUrl') || '').trim(); S.cfg.sincChave = (fd.get('sincChave') || '').trim(); await saveCfg();
+    if (Sinc.ativo() && S.cfg.sincUrl !== urlAntes) { // servidor novo: sobe tudo o que existe neste aparelho
+      S.lotes.forEach(l => Sinc.st.pend['lote:' + l.id] = ++Sinc.cont); S.vendas.forEach(v => Sinc.st.pend['venda:' + v.id] = ++Sinc.cont); S.movs.forEach(m => Sinc.st.pend['mov:' + m.id] = ++Sinc.cont);
+      if (Object.keys(S.tabela).length) Sinc.st.pend['tabela:atual'] = ++Sinc.cont; if (S.produtos.size) { Sinc.st.pend['catalogo:atual'] = ++Sinc.cont; Sinc.st.catVer ||= now(); }
+      Sinc.st.seq = 0; Sinc.salvar(); }
+    Sinc.ciclo(); S.view = 'home'; render(); toast('Salvo'); }
   if (k === 'novoLote') {
     if (!S.cfg.vendedor) { S.cfg.vendedor = fd.get('resp'); saveCfg(); }
     const cs = fd.getAll('cidade'), us = fd.getAll('uf'), ds = fd.getAll('data'), es = fd.getAll('evento');
@@ -891,16 +1006,21 @@ function exportarCaixa(l) {
 }
 async function receberCaixa(file) {
   try {
-    const pac = JSON.parse(await file.text()); if (!['caixa', 'backup'].includes(pac.tipo)) throw new Error('Arquivo não é de caixa do PDV');
+    const pac = JSON.parse(await file.text()); if (!['caixa', 'backup', 'pacote'].includes(pac.tipo)) throw new Error('Arquivo não é do PDV Shows');
     const lotes = pac.tipo === 'caixa' ? [pac.lote] : pac.lotes; let nv = 0, nm = 0;
-    for (const p of pac.produtos || []) if (!S.produtos.has(p.sku)) { S.produtos.set(p.sku, p); await DB.put('produtos', p); }
+    if (pac.tipo === 'pacote') { // configuração completa: catálogo e tabela substituem os deste aparelho
+      if (pac.produtos?.length) { pac.produtos.forEach(p => S.produtos.set(p.sku, p)); await DB.bulk('produtos', pac.produtos, true); }
+      if (pac.tabela && Object.keys(pac.tabela).length) { S.tabela = pac.tabela; S.tabelaInfo = pac.tabelaInfo || { em: pac.em, arq: 'configuração' }; await DB.put('meta', { k: 'tabela', v: S.tabela, em: S.tabelaInfo.em, arq: S.tabelaInfo.arq }, true); }
+      if (pac.cfg) { S.cfg = { ...S.cfg, ...pac.cfg, taxas: { ...S.cfg.taxas, ...(pac.cfg.taxas || {}) } }; await saveCfg(); }
+    } else for (const p of pac.produtos || []) if (!S.produtos.has(p.sku)) { S.produtos.set(p.sku, p); await DB.put('produtos', p); }
     for (const l of lotes) { const meu = S.lotes.find(x => x.id === l.id);
       if (!meu) { S.lotes.push(l); await DB.put('lotes', l); }
       else { // junta shows; carga e contagem ficam com o caixa principal
         l.shows.forEach(s => { if (!meu.shows.find(x => x.id === s.id)) meu.shows.push(s); }); if (!Object.keys(meu.carga || {}).length) meu.carga = l.carga; await saveLote(meu); } }
     for (const v of pac.vendas || []) { const i = S.vendas.findIndex(x => x.id === v.id); if (i < 0) { S.vendas.push(v); nv++; await DB.put('vendas', v); } else if (v.status === 'cancelada' && S.vendas[i].status !== 'cancelada') { S.vendas[i] = v; await DB.put('vendas', v); } }
     for (const m of pac.movs || []) { const i = S.movs.findIndex(x => x.id === m.id); if (i < 0) { S.movs.push(m); nm++; await DB.put('movs', m); } else if (m.status === 'cancelada') { S.movs[i] = m; await DB.put('movs', m); } }
-    render(); toast(`Recebido de ${pac.de || 'outro caixa'}: ${nv} vendas e ${nm} bonificações novas`);
+    render(); toast(pac.tipo === 'pacote' ? `Configuração recebida: ${pac.produtos?.length || 0} produtos, ${Object.keys(pac.tabela || {}).length} preços, ${lotes.length} lotes abertos` : `Recebido de ${pac.de || 'outro caixa'}: ${nv} vendas e ${nm} bonificações novas`);
+    Sinc.ciclo();
   } catch (e) { toast(e.message || 'Arquivo inválido', null, true); }
 }
 
@@ -983,7 +1103,7 @@ async function checarPersist() {
 let wakeLock;
 async function wake() { try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); } } catch (e) { } }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.view === 'lote') wake(); });
-addEventListener('online', render); addEventListener('offline', render);
+addEventListener('online', () => { render(); Sinc.ciclo(); }); addEventListener('offline', render);
 
 // ---------- início ----------
 (async function boot() {
@@ -993,7 +1113,9 @@ addEventListener('online', render); addEventListener('offline', render);
   const tb = meta.find(m => m.k === 'tabela'); if (tb) { S.tabela = tb.v || {}; S.tabelaInfo = { em: tb.em, arq: tb.arq }; }
   const cfg = meta.find(m => m.k === 'cfg'); if (cfg) S.cfg = { ...S.cfg, ...cfg.v, taxas: { ...S.cfg.taxas, ...(cfg.v.taxas || {}) } };
   if (!S.cfg.aparelho) { S.cfg.aparelho = uid(); saveCfg(); }
+  const sc = meta.find(m => m.k === 'sinc'); if (sc) Sinc.st = { ...Sinc.st, ...sc.v }; Sinc.cont = Math.max(0, ...Object.values(Sinc.st.pend));
   render();
+  setInterval(() => { if (document.visibilityState === 'visible') Sinc.ciclo(); }, 15000); Sinc.ciclo();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) { }
 })();

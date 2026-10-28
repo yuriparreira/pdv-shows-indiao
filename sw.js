@@ -1,5 +1,5 @@
 // Service worker: guarda o app para abrir sem internet e as fotos dos produtos.
-const APP = 'pdv-app-v5';
+const APP = 'pdv-app-v7';
 const ARQ = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon.svg',
   'marca/logo-negativo.svg', 'marca/logo-positivo.svg', 'marca/JockeyOne-Regular.ttf', 'marca/FamiljenGrotesk-VariableFont_wght.ttf',
   'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
@@ -21,7 +21,10 @@ self.addEventListener('fetch', e => {
     }));
     return;
   }
-  // app: rede primeiro (pega atualização), cache se estiver offline
-  e.respondWith(fetch(r).then(res => { if (res.ok || res.type === 'opaque') { const cp = res.clone(); caches.open(APP).then(c => c.put(r, cp)); } return res; })
-    .catch(() => caches.match(r, { ignoreSearch: true }).then(m => m || caches.match('index.html'))));
+  // sincronização e outros serviços externos passam direto (nunca vão para o cache)
+  if (u.origin !== location.origin && u.hostname !== 'cdnjs.cloudflare.com') return;
+  // app: rede primeiro, revalidando com o servidor (versão nova chega na primeira abertura com internet); offline usa o cache
+  const req = r.mode === 'navigate' ? new Request(r.url, { cache: 'no-cache', credentials: 'same-origin' }) : (u.origin === location.origin ? new Request(r, { cache: 'no-cache' }) : r);
+  e.respondWith(fetch(req).then(res => { if (res.ok || res.type === 'opaque') { const cp = res.clone(); caches.open(APP).then(c => c.put(r.url, cp)); } return res; })
+    .catch(() => caches.match(r.url, { ignoreSearch: true }).then(m => m || caches.match('index.html'))));
 });
