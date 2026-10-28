@@ -691,10 +691,13 @@ function divergencias(l, sd) {
   ${l.status === 'contagem' ? `<button class="btn block" style="margin-bottom:10px;min-height:48px" data-a="destravar">Destravar vendas (zera a contagem)</button>` : ''}
   ${l.status !== 'fechado' ? `<div class="grid2"><button class="btn" data-a="recontar">Voltar e recontar</button><button class="btn ok" data-a="fecharLote">Fechar lote</button></div>` : `<div class="muted small">Lote fechado em ${fmtDT(l.fechadoEm)} por ${esc(l.fechadoPor)}.</div>`}`;
 }
-function tabelaGrupo(o, titulo, comTaxa = true) {
+const pctTaxa = x => (x.valor ? x.taxa / x.valor * 100 : 0).toFixed(2).replace('.', ',') + '%';
+function tabelaGrupo(o, titulo, comTaxa = true, total = false) {
   const ks = Object.entries(o).sort((a, b) => b[1].valor - a[1].valor); if (!ks.length) return '';
-  return `<div class="tw"><table class="t" style="margin:8px 0"><thead><tr><th>${titulo}</th><th>Qtd</th><th>Bruto</th>${comTaxa ? '<th>Taxa</th><th>%</th><th>Líquido</th>' : ''}</tr></thead><tbody>
-  ${ks.map(([k, x]) => `<tr><td>${esc(k)}</td><td>${x.n}</td><td>${brl(x.valor)}</td>${comTaxa ? `<td>${brl(x.taxa)}</td><td>${x.valor ? (x.taxa / x.valor * 100).toFixed(2).replace('.', ',') : '0'}%</td><td>${brl(x.liq)}</td>` : ''}</tr>`).join('')}</tbody></table></div>`;
+  const t = ks.reduce((s, [, x]) => ({ n: s.n + x.n, valor: s.valor + x.valor, taxa: s.taxa + x.taxa, liq: s.liq + x.liq }), { n: 0, valor: 0, taxa: 0, liq: 0 });
+  const linha = (k, x, tag = 'td') => `<tr><${tag}>${esc(k)}</${tag}><${tag}>${x.n}</${tag}><${tag}>${brl(x.valor)}</${tag}>${comTaxa ? `<${tag}>${brl(x.taxa)}</${tag}><${tag}>${pctTaxa(x)}</${tag}><${tag}>${brl(x.liq)}</${tag}>` : ''}</tr>`;
+  return `<div class="tw"><table class="t" style="margin:8px 0"><thead><tr><th>${titulo}</th><th>Qtd</th><th>Bruto</th>${comTaxa ? '<th>Taxa</th><th>Taxa efetiva</th><th>Líquido</th>' : ''}</tr></thead><tbody>
+  ${ks.map(([k, x]) => linha(k, x)).join('')}${total ? linha('Total', t, 'th') : ''}</tbody></table></div>`;
 }
 function cardInfinite(l) {
   const a = analiseInfinite(l); if (!a) return '';
@@ -704,8 +707,10 @@ function cardInfinite(l) {
   ${a.semPdv.length ? `<div class="warn" style="margin-top:12px"><b>${a.semPdv.length} transações sem venda no PDV</b> (${brl(a.semPdv.reduce((x, t) => x + t.valor, 0))}): venda não registrada ou valor diferente.<br>${a.semPdv.slice(0, 8).map(t => `${fmtDT(t.t)} · ${FORMA[t.forma]} ${brl(t.valor)} · ${esc(t.term)}`).join('<br>')}${a.semPdv.length > 8 ? '<br>…' : ''}</div>` : ''}
   ${a.semTx.length ? `<div class="warn"><b>${a.semTx.length} pagamentos do PDV sem transação</b>: confira valor e forma.<br>${a.semTx.slice(0, 8).map(p => `Venda #${p.num} · ${FORMA[p.forma]} ${brl(p.valor)}`).join('<br>')}</div>` : ''}
   ${a.negadas.length ? `<p class="small muted">${a.negadas.length} negadas/canceladas na maquininha (não entram nos totais).</p>` : ''}
-  <h2 style="margin-top:12px">Por origem</h2>${tabelaGrupo(a.porTerm, 'Origem')}
-  <h2>Por bandeira</h2>${tabelaGrupo(a.porBand, 'Bandeira')}
+  <h2 style="margin-top:12px">Por forma e bandeira (baixa do contas a receber)</h2>
+  <p class="muted small">Baixe cada linha no contas a receber do Tiny pelo bruto, com a taxa como despesa: o líquido é o que cai na conta.</p>
+  ${tabelaGrupo(a.porFormaBand, 'Forma · bandeira', true, true)}
+  <h2>Por origem</h2>${tabelaGrupo(a.porTerm, 'Origem')}
   ${Object.keys(a.porParc).length ? `<h2>Crédito por parcelas</h2>${tabelaGrupo(a.porParc, 'Parcelas')}` : ''}
   <h2>Por show (pela data da transação)</h2>${tabelaGrupo(a.porShow, 'Show')}</div>`;
 }
@@ -767,7 +772,7 @@ function tFinanceiro(l) {
     <p class="muted small">Entraram na InfinitePay e não têm venda lançada. Se foram vendas, lance como "venda não registrada" e escolha a peça que faltou na contagem: ela sai da perda e entra no pedido de venda.</p>
     ${lst.map(t => `<div class="line"><div class="grow"><b>${brl(t.valor)}</b> · ${FORMA[t.forma]}${t.parc > 1 ? ' ' + t.parc + 'x' : ''}<div class="muted small">${fmtDT(t.t)} · ${esc(t.term)}</div></div><button class="btn" style="min-height:44px" data-a="ajusteDeTx" data-tx="${esc(t.id + t.t)}">Justificar</button></div>`).join('')}</div>`; })()}
   <div class="card"><h2>3. Justificativas</h2>
-    <p class="muted small">Toda diferença precisa de explicação. Desconto não lançado, venda não registrada, preço errado e estorno mudam o valor da venda. Quebra de caixa e "outro" ficam como ajuste à parte. Forma trocada só explica diferença entre formas.</p>
+    <p class="muted small">Toda diferença precisa de explicação. Desconto não lançado, venda não registrada, preço errado e estorno mudam o valor da venda. Quebra de caixa e "outro" não mudam a venda nem o DAS, mas saem da margem do show. Forma trocada só explica diferença entre formas.</p>
     ${F.f.ajustes.map((a, i) => `<div class="line"><div class="grow"><b>${esc(CAT_AJ[a.cat]?.nome || a.cat)}</b><div class="muted small">${a.sku ? esc(a.sku) + ' · ' + a.qtd + ' pç · ' : ''}${esc(a.obs || '')}${CAT_AJ[a.cat]?.venda ? ' · muda a venda' : ''}</div></div><b class="${a.dir === 'menos' ? 'neg' : 'pos'}">${CAT_AJ[a.cat]?.neutro ? '' : a.dir === 'menos' ? '−' : '+'}${brl(a.valor)}</b>${fe ? '' : `<button class="iconbtn" data-a="rmAjuste" data-i="${i}">✕</button>`}</div>`).join('') || '<div class="muted small">Nenhuma ainda.</div>'}
     ${fe ? '' : `<button class="btn block" style="min-height:48px;margin-top:8px" data-a="novoAjuste">+ Justificar diferença</button>`}</div>
   <div class="card"><h2>4. Resultado</h2>
@@ -778,10 +783,10 @@ function tFinanceiro(l) {
 }
 // ---------- margem de contribuição por show ----------
 const CATS_DESP = ['Comissão sobre vendas', 'Diárias de alimentação', 'Fotos', 'Transporte / combustível', 'Hospedagem', 'Material de venda', 'Outros'];
-// Receita (conferida ou PDV) − DAS − taxas de cartão − CMV − bonificações − perdas − despesas, por show e no lote
+// Receita (conferida ou PDV) − DAS − taxas de cartão − CMV − bonificações − perdas − despesas − quebra de caixa, por show e no lote
 function margem(l) {
   const F = fin(l); const conf = F.f.concluido; const shows = l.shows || [];
-  const cols = shows.map(s => ({ id: s.id, nome: `${s.cidade}/${s.uf}`, data: s.data, rec: 0, das: 0, taxa: 0, cmv: 0, bonif: 0, perda: 0, desp: 0, despItens: [] }));
+  const cols = shows.map(s => ({ id: s.id, nome: `${s.cidade}/${s.uf}`, data: s.data, rec: 0, das: 0, taxa: 0, cmv: 0, bonif: 0, perda: 0, desp: 0, quebra: 0, despItens: [] }));
   const col = id => cols.find(c => c.id === id) || cols[0];
   const custo = sku => custoDe(sku); const semCusto = new Set();
   const cmvDe = (sku, q) => { const c = custo(sku); if (!c && q) semCusto.add(sku); return c * q; };
@@ -793,10 +798,11 @@ function margem(l) {
   else vendasLote(l).forEach(v => { const c = col(v.showId); if (c) v.pagamentos.forEach(p => c.taxa += p.valor * taxaEst(p) / 100); });
   // ajustes da conferência financeira que mudam a venda: venda achada no extrato vai para o show da transação; o resto é rateado
   const recPDV = cols.reduce((a, c) => a + c.rec, 0); const peso = c => recPDV ? c.rec / recPDV : 1 / (cols.length || 1);
+  const showDoAjuste = a => { if (!a.txId || !an) return null; const t = an.ap.find(t => t.id + t.t === a.txId); if (!t) return null;
+    const d = new Date(+new Date(t.t) - CORTE_H * 3600e3); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); const dia = d.toISOString().slice(0, 10);
+    return cols.filter(c => c.data <= dia && (+new Date(dia) - +new Date(c.data)) <= 864e5).sort((x, y) => y.data.localeCompare(x.data))[0] || null; };
   if (conf) F.f.ajustes.filter(a => CAT_AJ[a.cat]?.venda).forEach(a => {
-    const v = F.sinal(a); let alvo = null;
-    if (a.txId && an) { const t = an.ap.find(t => t.id + t.t === a.txId); if (t) { const d = new Date(+new Date(t.t) - CORTE_H * 3600e3); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); const dia = d.toISOString().slice(0, 10);
-      alvo = cols.filter(c => c.data <= dia && (+new Date(dia) - +new Date(c.data)) <= 864e5).sort((x, y) => y.data.localeCompare(x.data))[0]; } }
+    const v = F.sinal(a); const alvo = showDoAjuste(a);
     if (alvo) alvo.rec += v; else cols.forEach(c => c.rec += v * peso(c));
     if (a.cat === 'venda_nr' && a.sku && a.qtd && !l.perdaExportada) { const k = cmvDe(a.sku, a.qtd); if (alvo) alvo.cmv += k; else cols.forEach(c => c.cmv += k * peso(c)); }
   });
@@ -810,12 +816,18 @@ function margem(l) {
     const alvo = d.showId ? cols.filter(c => c.id === d.showId) : cols;
     alvo.forEach(c => { const base = d.showId ? 1 : pesoF(c); const v = d.tipo === 'pct' ? c.rec * d.valor / 100 : d.valor * base; c.desp += v; c.despItens.push({ ...d, efetivo: v }); });
   });
-  cols.forEach(c => { c.mc = c.rec - c.das - c.taxa - c.cmv - c.bonif - c.perda - c.desp; c.pct = c.rec ? c.mc / c.rec * 100 : 0; });
-  const tot = { nome: 'Total do lote', rec: 0, das: 0, taxa: 0, cmv: 0, bonif: 0, perda: 0, desp: 0, mc: 0 };
-  cols.forEach(c => ['rec', 'das', 'taxa', 'cmv', 'bonif', 'perda', 'desp', 'mc'].forEach(k => tot[k] += c[k])); tot.pct = tot.rec ? tot.mc / tot.rec * 100 : 0;
+  // quebra de caixa e "outro": não mudam a venda (nem o pedido do Tiny, nem o DAS), mas tiram dinheiro do resultado.
+  // Positivo = faltou dinheiro. Vai para o show da transação, se houver; senão é rateado pela receita.
+  if (conf) F.f.ajustes.filter(a => !CAT_AJ[a.cat]?.venda && !CAT_AJ[a.cat]?.neutro).forEach(a => {
+    const v = -F.sinal(a); const alvo = showDoAjuste(a);
+    if (alvo) alvo.quebra += v; else cols.forEach(c => c.quebra += v * pesoF(c));
+  });
+  cols.forEach(c => { c.mc = c.rec - c.das - c.taxa - c.cmv - c.bonif - c.perda - c.desp - c.quebra; c.pct = c.rec ? c.mc / c.rec * 100 : 0; });
+  const tot = { nome: 'Total do lote', rec: 0, das: 0, taxa: 0, cmv: 0, bonif: 0, perda: 0, desp: 0, quebra: 0, mc: 0 };
+  cols.forEach(c => ['rec', 'das', 'taxa', 'cmv', 'bonif', 'perda', 'desp', 'quebra', 'mc'].forEach(k => tot[k] += c[k])); tot.pct = tot.rec ? tot.mc / tot.rec * 100 : 0;
   return { cols, tot, conf, taxaReal, semCusto: [...semCusto] };
 }
-const LINHAS_MG = [['rec', 'Receita'], ['das', '(−) DAS'], ['taxa', '(−) Taxas de cartão'], ['cmv', '(−) CMV (custo das peças)'], ['bonif', '(−) Bonificações a custo'], ['perda', '(−) Perdas da contagem'], ['desp', '(−) Despesas do show'], ['mc', '= Margem de contribuição']];
+const LINHAS_MG = [['rec', 'Receita'], ['das', '(−) DAS'], ['taxa', '(−) Taxas de cartão'], ['cmv', '(−) CMV (custo das peças)'], ['bonif', '(−) Bonificações a custo'], ['perda', '(−) Perdas da contagem'], ['desp', '(−) Despesas do show'], ['quebra', '(−) Quebra de caixa e outros ajustes'], ['mc', '= Margem de contribuição']];
 function tabelaMargem(M, cls = 't') {
   const cs = M.cols.length > 1 ? [...M.cols, M.tot] : [M.tot];
   return `<table class="${cls}"><thead><tr><th class="l"></th>${cs.map(c => `<th>${esc(c.nome)}</th>`).join('')}</tr></thead><tbody>
@@ -1254,7 +1266,9 @@ function analiseInfinite(l) {
     if (best) best.usado = true; else semTx.push(p);
   });
   const semPdv = livre.filter(x => !x.usado);
-  return { ap, porForma: soma(ap, x => x.forma), porBand: soma(cartoes, x => x.band || '—'), porTerm: soma(ap, x => x.term), porParc: soma(ap.filter(x => x.forma === 'credito'), x => x.parc + 'x'),
+  // forma + bandeira (ex.: "Crédito · Mastercard"): é como o contas a receber do Tiny é baixado (líquido = bruto − taxa)
+  const formaBand = x => x.forma === 'pix' ? 'Pix' : `${FORMA[x.forma]} · ${titulo(x.band || 'sem bandeira')}`;
+  return { ap, porForma: soma(ap, x => x.forma), porBand: soma(cartoes, x => x.band || '—'), porFormaBand: soma(ap, formaBand), porTerm: soma(ap, x => x.term), porParc: soma(ap.filter(x => x.forma === 'credito'), x => x.parc + 'x'),
     porShow: soma(ap, showDe), taxa: ap.reduce((a, x) => a + x.taxa, 0), bruto: ap.reduce((a, x) => a + x.valor, 0), liq: ap.reduce((a, x) => a + x.liq, 0),
     brutoCartao: cartoes.reduce((a, x) => a + x.valor, 0), negadas: inf.txs.filter(x => !x.status.startsWith('aprov')), semTx, semPdv, conciliadas: pags.length - semTx.length, pags: pags.length };
 }
@@ -1385,9 +1399,12 @@ function relatorioHTML(l) {
   <tr><th class="l">Total</th><th>${brl(r.liq)}</th>${inf ? `<th>${brl(Object.values(inf.formas).reduce((a, b) => a + b, 0))}</th><th></th>` : ''}</tr></tbody></table>
   ${inf ? `<p class="foot">Extrato InfinitePay: ${inf.n} transações aprovadas entre ${fmtDT(inf.de)} e ${fmtDT(inf.ate)}. Dinheiro não passa pela InfinitePay: conferir com o caixa físico.</p>` : `<p class="foot">Sem extrato da InfinitePay. Taxas estimadas pelo PDV: ${brl(taxasPdv(l))} · líquido estimado ${brl(r.liq - taxasPdv(l))}.</p>`}
   ${(() => { const a = analiseInfinite(l); if (!a) return '';
-    const tab = (o, t) => { const ks = Object.entries(o).sort((x, y) => y[1].valor - x[1].valor); return ks.length ? `<table><thead><tr><th class="l">${t}</th><th>Qtd</th><th>Bruto</th><th>Taxa</th><th>%</th><th>Líquido</th></tr></thead><tbody>${ks.map(([k, x]) => `<tr><td class="l">${esc(k)}</td><td>${x.n}</td><td>${brl(x.valor)}</td><td>${brl(x.taxa)}</td><td>${x.valor ? (x.taxa / x.valor * 100).toFixed(2).replace('.', ',') : 0}%</td><td>${brl(x.liq)}</td></tr>`).join('')}</tbody></table>` : ''; };
+    const tab = (o, t, total = false) => { const ks = Object.entries(o).sort((x, y) => y[1].valor - x[1].valor); if (!ks.length) return '';
+      const s = ks.reduce((a, [, x]) => ({ n: a.n + x.n, valor: a.valor + x.valor, taxa: a.taxa + x.taxa, liq: a.liq + x.liq }), { n: 0, valor: 0, taxa: 0, liq: 0 });
+      const ln = (k, x, g = 'td') => `<tr><${g} class="l">${esc(k)}</${g}><${g}>${x.n}</${g}><${g}>${brl(x.valor)}</${g}><${g}>${brl(x.taxa)}</${g}><${g}>${pctTaxa(x)}</${g}><${g}>${brl(x.liq)}</${g}></tr>`;
+      return `<table><thead><tr><th class="l">${t}</th><th>Qtd</th><th>Bruto</th><th>Taxa</th><th>Taxa efetiva</th><th>Líquido</th></tr></thead><tbody>${ks.map(([k, x]) => ln(k, x)).join('')}${total ? ln('Total', s, 'th') : ''}</tbody></table>`; };
     return `<h2>Conferência InfinitePay</h2><div class="k"><div><b>${brl(a.bruto)}</b>bruto aprovado</div><div><b>${brl(a.taxa)}</b>taxas (${a.brutoCartao ? (a.taxa / a.brutoCartao * 100).toFixed(2).replace('.', ',') : 0}% dos cartões)</div><div><b>${brl(a.liq)}</b>líquido a receber</div><div><b>${a.conciliadas}/${a.pags}</b>pagamentos conciliados</div></div>
-    ${tab(a.porTerm, 'Origem (máquina / tap / Pix)')}${tab(a.porBand, 'Bandeira')}${Object.keys(a.porParc).length ? tab(a.porParc, 'Crédito por parcelas') : ''}${tab(a.porShow, 'Show (data da transação)')}
+    ${tab(a.porFormaBand, 'Forma · bandeira (baixa do contas a receber)', true)}${tab(a.porTerm, 'Origem (máquina / tap / Pix)')}${Object.keys(a.porParc).length ? tab(a.porParc, 'Crédito por parcelas') : ''}${tab(a.porShow, 'Show (data da transação)')}
     ${a.semPdv.length ? `<p><b class="neg">Transações sem venda no PDV (${a.semPdv.length}, ${brl(a.semPdv.reduce((x, t) => x + t.valor, 0))}):</b></p><table><tbody>${a.semPdv.map(t => `<tr><td class="l">${fmtDT(t.t)}</td><td class="l">${FORMA[t.forma]} ${esc(t.band)} ${t.parc > 1 ? t.parc + 'x' : ''}</td><td class="l">${esc(t.term)}</td><td>${brl(t.valor)}</td></tr>`).join('')}</tbody></table>` : ''}
     ${a.semTx.length ? `<p><b class="neg">Pagamentos do PDV sem transação (${a.semTx.length}):</b> ${a.semTx.map(p => `#${p.num} ${FORMA[p.forma]} ${brl(p.valor)}`).join(' · ')}</p>` : ''}
     ${a.negadas.length ? `<p class="foot">${a.negadas.length} transações negadas ou canceladas não entram nos totais.</p>` : ''}`; })()}
