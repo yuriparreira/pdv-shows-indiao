@@ -86,12 +86,12 @@ const Sinc = {
     if (tipo === 'lote') { const o = S.lotes.find(x => x.id === id); return o && [{ ...base, tipo, id, loteId: id, atualizado: o.atualizado || now(), json: JSON.stringify(o) }]; }
     if (tipo === 'venda') { const o = S.vendas.find(x => x.id === id); return o && [{ ...base, tipo, id, loteId: o.loteId, atualizado: o.atualizado || o.ts, json: JSON.stringify(o) }]; }
     if (tipo === 'mov') { const o = S.movs.find(x => x.id === id); return o && [{ ...base, tipo, id, loteId: o.loteId, atualizado: o.atualizado || o.ts, json: JSON.stringify(o) }]; }
-    if (tipo === 'tabela') { const em = S.tabelaInfo?.em || now(); return [{ ...base, tipo, id: 'atual', atualizado: em, json: JSON.stringify({ v: S.tabela, em, arq: S.tabelaInfo?.arq || '' }) }]; }
-    if (tipo === 'custos') { const em = S.custosInfo?.em || now(); return [{ ...base, tipo, id: 'atual', atualizado: em, json: JSON.stringify({ v: S.custos, em, arq: S.custosInfo?.arq || '' }) }]; }
-    if (tipo === 'catalogo') { // a célula da planilha aceita 50 mil caracteres: o catálogo vai em partes de 30 mil (folga para o escape do JSON)
-      const ver = this.st.catVer || now(); const txt = JSON.stringify([...S.produtos.values()].map(({ _rot, ...p }) => p)); const tam = 30000; const n = Math.ceil(txt.length / tam) || 1;
-      return Array.from({ length: n }, (_, i) => ({ ...base, tipo: 'catalogo', id: 'parte' + i, atualizado: ver, json: JSON.stringify({ ver, i, n, txt: txt.slice(i * tam, (i + 1) * tam) }) }));
-    }
+    // a célula da planilha aceita 50 mil caracteres: registros grandes vão em partes de 30 mil (folga para o escape do JSON)
+    const partes = (tipo, ver, obj) => { const txt = JSON.stringify(obj); const tam = 30000; const n = Math.ceil(txt.length / tam) || 1;
+      return Array.from({ length: n }, (_, i) => ({ ...base, tipo, id: 'parte' + i, atualizado: ver, json: JSON.stringify({ ver, i, n, txt: txt.slice(i * tam, (i + 1) * tam) }) })); };
+    if (tipo === 'tabela') { const em = S.tabelaInfo?.em || now(); return partes('tabela', em, { v: S.tabela, em, arq: S.tabelaInfo?.arq || '' }); }
+    if (tipo === 'custos') { const em = S.custosInfo?.em || now(); return partes('custos', em, { v: S.custos, em, arq: S.custosInfo?.arq || '' }); }
+    if (tipo === 'catalogo') return partes('catalogo', this.st.catVer || now(), [...S.produtos.values()].map(({ _rot, ...p }) => p));
     return null;
   },
   async enviar() {
@@ -112,13 +112,21 @@ const Sinc = {
     while (mais) {
       const u = `${S.cfg.sincUrl}?chave=${encodeURIComponent(S.cfg.sincChave)}&desde=${this.st.seq}`;
       const r = await fetch(u).then(x => x.json()); if (!r.ok) throw new Error(r.erro || 'falha ao receber');
-      for (const reg of r.registros) if (reg.aparelho !== S.cfg.aparelho && await this.aplicar(reg)) mudou = true;
+      for (const reg of r.registros) { if (reg.aparelho === S.cfg.aparelho) continue;
+        try { if (await this.aplicar(reg)) mudou = true; } catch (e) { console.warn('registro ignorado', reg.tipo, reg.id, e.message); } }
       this.st.seq = r.seq; mais = r.mais;
     }
     this.salvar(); return mudou;
   },
   async aplicar(reg) {
-    const o = JSON.parse(reg.json); const t = reg.tipo;
+    if (!reg.json) return false; const o = JSON.parse(reg.json); const t = reg.tipo;
+    // registro em partes: junta as partes da mesma versão e só aplica quando estiverem todas
+    let doc = o;
+    if (o.txt !== undefined && o.n) {
+      const chave = t + '|' + o.ver; const pt = this.partes[chave] ||= []; pt[o.i] = o.txt;
+      if (pt.filter(x => x !== undefined).length < o.n) return false;
+      doc = JSON.parse(pt.join('')); delete this.partes[chave];
+    }
     const lista = t === 'lote' ? S.lotes : t === 'venda' ? S.vendas : t === 'mov' ? S.movs : null;
     if (lista) {
       if (this.st.pend[t + ':' + o.id]) return false; // alteração local ainda não enviada: a local vence e sobe depois
@@ -128,14 +136,13 @@ const Sinc = {
       if (i < 0) lista.push(o); else lista[i] = o;
       await DB.put(t === 'lote' ? 'lotes' : t === 'venda' ? 'vendas' : 'movs', o, true); return true;
     }
-    if (t === 'tabela') { if (S.tabelaInfo?.em && S.tabelaInfo.em >= o.em) return false; S.tabela = o.v || {}; S.tabelaInfo = { em: o.em, arq: o.arq }; await DB.put('meta', { k: 'tabela', v: S.tabela, em: o.em, arq: o.arq }, true); return true; }
-    if (t === 'custos') { if (S.custosInfo?.em && S.custosInfo.em >= o.em) return false; S.custos = o.v || {}; S.custosInfo = { em: o.em, arq: o.arq }; await DB.put('meta', { k: 'custos', v: S.custos, em: o.em, arq: o.arq }, true); return true; }
+    if (t === 'tabela') { if (S.tabelaInfo?.em && S.tabelaInfo.em >= doc.em) return false; S.tabela = doc.v || {}; S.tabelaInfo = { em: doc.em, arq: doc.arq }; await DB.put('meta', { k: 'tabela', v: S.tabela, em: doc.em, arq: doc.arq }, true); return true; }
+    if (t === 'custos') { if (S.custosInfo?.em && S.custosInfo.em >= doc.em) return false; S.custos = doc.v || {}; S.custosInfo = { em: doc.em, arq: doc.arq }; await DB.put('meta', { k: 'custos', v: S.custos, em: doc.em, arq: doc.arq }, true); return true; }
     if (t === 'catalogo') {
-      if (this.st.catVer && this.st.catVer >= o.ver) return false;
-      const pt = this.partes[o.ver] ||= []; pt[o.i] = o.txt;
-      if (pt.filter(x => x !== undefined).length < o.n) return false;
-      const ps = JSON.parse(pt.join('')); ps.forEach(p => S.produtos.set(p.sku, p)); await DB.bulk('produtos', ps, true);
-      this.st.catVer = o.ver; S.cfg.catalogoEm = o.ver; saveCfg(); delete this.partes[o.ver]; return true;
+      // só recusa se este aparelho já tem um catálogo completo mais novo (produtos criados pela carga não contam)
+      if (this.st.catFull && this.st.catVer && this.st.catVer >= o.ver) return false;
+      const ps = Array.isArray(doc) ? doc : []; ps.forEach(p => S.produtos.set(p.sku, { ...(S.produtos.get(p.sku) || {}), ...p })); await DB.bulk('produtos', ps, true);
+      this.st.catVer = o.ver; this.st.catFull = true; S.cfg.catalogoEm = o.ver; saveCfg(); return true;
     }
     return false;
   },
@@ -279,7 +286,7 @@ async function importarCatalogo(file) {
     }
     await DB.bulk('produtos', lista);
   }
-  S.cfg.catalogoEm = now(); saveCfg();
+  S.cfg.catalogoEm = now(); saveCfg(); Sinc.st.catFull = true; Sinc.salvar();
   return { n, novos };
 }
 async function importarCarga(file, l) {
@@ -308,7 +315,7 @@ async function importarCarga(file, l) {
       S.produtos.set(sku, p); lista.push(p);
     }
   }
-  if (lista.length) await DB.bulk('produtos', lista);
+  if (lista.length) await DB.bulk('produtos', lista, true); // provisórios: não sobem nem substituem o catálogo da planilha
   await aplicarCarga(l, carga, file.name);
   return { linhas, pecas: Object.values(carga).reduce((a, b) => a + b, 0), semCadastro: lista.length };
 }
