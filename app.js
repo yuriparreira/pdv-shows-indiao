@@ -1370,6 +1370,14 @@ function relatorioHTML(l) {
   ${(l.historico || []).map(h => `<tr><td class="l">${h.acao === 'destravou vendas' || !h.acao ? 'Contagem destravada' : esc(titulo(h.acao))}</td><td class="l">${fmtDT(h.ts)} · ${esc(h.quem)} · ${esc(h.motivo)}${h.contadosApagados ? ` · ${h.contadosApagados} SKUs de contagem apagados` : ''}</td></tr>`).join('')}</table>
   <h2>Resumo</h2><div class="k"><div><b>${brl(r.liq)}</b>vendas líquidas</div><div><b>${r.n}</b>vendas (${r.canc} canceladas)</div><div><b>${r.pecas}</b>peças vendidas</div><div><b>${brl(r.ticket)}</b>ticket médio</div></div>
   <p>Bruto ${brl(r.bruto)} · descontos ${brl(r.desc)} · bonificações ${soma(bonif, x => x.mov)} peças · perdas na contagem ${soma(perdas, x => x.perda)} peças · sobras ${soma(sobras, x => x.sobra)} peças</p>
+  ${(() => { const sh = l.shows || []; if (!sh.length) return '';
+    // vendas lançadas no PDV por show (a conferência financeira ajusta o lote, não cada show)
+    const xs = sh.map(s => ({ s, x: resumo(l, s.id), bon: movs.filter(m => m.showId === s.id).reduce((a, m) => a + m.qtd, 0) }));
+    const top = Math.max(...xs.map(o => o.x.liq));
+    return `<h2>Vendas por show</h2><div class="shows">${xs.map(({ s, x, bon }) => { const pct = r.liq ? x.liq / r.liq * 100 : 0;
+      return `<div class="s${xs.length > 1 && x.liq === top && top > 0 ? ' lider' : ''}"><div class="c">${esc(s.cidade)}/${s.uf}</div><div class="d">${fmtD(s.data)}${s.evento ? ' · ' + esc(s.evento) : ''}</div>
+      <div class="v">${brl(x.liq)}</div><div class="bar"><i style="width:${Math.min(100, pct).toFixed(1)}%"></i></div>
+      <div class="m"><span><b>${pct.toFixed(0)}%</b> do lote</span><span><b>${x.n}</b> vendas</span><span><b>${x.pecas}</b> peças</span><span>ticket <b>${brl(x.ticket)}</b></span>${bon ? `<span><b>${bon}</b> bonif.</span>` : ''}</div></div>`; }).join('')}</div>`; })()}
 
   <h2>Baixas no Tiny (documentos separados)</h2>
   <table><thead><tr><th class="l">Documento</th><th class="l">CFOP</th><th>Peças</th><th>Valor</th><th class="l">Base do valor</th></tr></thead><tbody>
@@ -1409,7 +1417,7 @@ function relatorioHTML(l) {
     ${a.semTx.length ? `<p><b class="neg">Pagamentos do PDV sem transação (${a.semTx.length}):</b> ${a.semTx.map(p => `#${p.num} ${FORMA[p.forma]} ${brl(p.valor)}`).join(' · ')}</p>` : ''}
     ${a.negadas.length ? `<p class="foot">${a.negadas.length} transações negadas ou canceladas não entram nos totais.</p>` : ''}`; })()}
 
-  <h2>Por show</h2><table><thead><tr><th class="l">Show</th><th>Vendas</th><th>Peças</th><th>Pix</th><th>Crédito</th><th>Débito</th><th>Dinheiro</th><th>Outro</th><th>Líquido</th></tr></thead><tbody>
+  <h2>Por show · formas de pagamento</h2><table><thead><tr><th class="l">Show</th><th>Vendas</th><th>Peças</th><th>Pix</th><th>Crédito</th><th>Débito</th><th>Dinheiro</th><th>Outro</th><th>Líquido</th></tr></thead><tbody>
   ${(l.shows || []).map(s => { const x = resumo(l, s.id); return `<tr><td class="l">${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</td><td>${x.n}</td><td>${x.pecas}</td>${FORMAS.map(f => `<td>${brl(x.formas[f.id] || 0)}</td>`).join('')}<td><b>${brl(x.liq)}</b></td></tr>`; }).join('')}</tbody></table>
 
   ${perdas.length || sobras.length ? `<h2>Divergências da contagem</h2><table><thead><tr><th class="l">SKU</th><th class="l">Descrição</th><th>Esperado</th><th>Contado</th><th>Diferença</th><th class="l">Observação</th></tr></thead><tbody>
