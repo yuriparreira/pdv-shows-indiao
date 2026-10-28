@@ -1,5 +1,5 @@
 // Service worker: guarda o app para abrir sem internet e as fotos dos produtos.
-const APP = 'pdv-app-v7';
+const APP = 'pdv-app-v9';
 const ARQ = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon.svg',
   'marca/logo-negativo.svg', 'marca/logo-positivo.svg', 'marca/JockeyOne-Regular.ttf', 'marca/FamiljenGrotesk-VariableFont_wght.ttf',
   'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',

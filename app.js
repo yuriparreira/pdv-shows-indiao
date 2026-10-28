@@ -911,11 +911,14 @@ async function lerInfinite(file, l) {
     orig: c(k => k === 'tipo - origem'), dados: c(k => k.includes('dados adicionais')), st: c(k => k === 'status'), val: c(k => k.startsWith('valor')), liq: c(k => k.startsWith('liquido') || k.startsWith('lquido') || k.includes('quido')),
     dt: c(k => k.startsWith('data')), nome: c(k => k === 'origem - nome'), id: c(k => k === 'identificador') };
   const dt = x => { if (x instanceof Date) return +x; if (typeof x === 'number') return Math.round((x - 25569) * 864e5) + new Date().getTimezoneOffset() * 6e4; const m = String(x).match(/(\d{2})\/(\d{2})\/(\d{4})[ T]?(\d{2})?:?(\d{2})?/); if (m) return +new Date(+m[3], m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0)); return +new Date(x); };
-  // janela do lote: vendas do PDV ±3h; sem vendas, as datas dos shows (do meio-dia ao dia seguinte às 8h)
-  const ts = vendasLote(l).map(v => +new Date(v.ts)).sort((a, b) => a - b); const ds = (l.shows || []).map(s => s.data).sort();
-  let de = 0, ate = Infinity;
-  if (ts.length) { de = ts[0] - 3 * 3600e3; ate = ts[ts.length - 1] + 3 * 3600e3; }
-  else if (ds.length) { de = +new Date(ds[0] + 'T12:00'); ate = +new Date(ds[ds.length - 1] + 'T12:00') + 20 * 3600e3; }
+  // janela do lote: do meio-dia do primeiro show até o meio-dia seguinte ao último show. A madrugada (show que passa da
+  // meia-noite) entra no lote certo, e um show que começa à noite no mesmo dia em que outro terminou de madrugada fica
+  // no lote dele. Vendas do PDV fora disso ampliam a janela.
+  const ts = vendasLote(l).map(v => +new Date(v.ts)).sort((a, b) => a - b); const ds = (l.shows || []).map(s => s.data).filter(Boolean).sort();
+  let de = Infinity, ate = -Infinity;
+  if (ds.length) { de = +new Date(ds[0] + 'T00:00') + CORTE_H * 3600e3; ate = +new Date(ds[ds.length - 1] + 'T00:00') + 864e5 + CORTE_H * 3600e3 - 1; }
+  if (ts.length) { de = Math.min(de, ts[0] - 3 * 3600e3); ate = Math.max(ate, ts[ts.length - 1] + 3 * 3600e3); }
+  if (!isFinite(de)) { de = 0; ate = Infinity; }
   const formaDe = m => m.startsWith('pix') ? 'pix' : m.startsWith('cr') ? 'credito' : m.startsWith('d') ? 'debito' : null;
   const txs = []; let fora = 0;
   aba.linhas.forEach(r => {
@@ -934,6 +937,8 @@ async function lerInfinite(file, l) {
   l.conferenciaInfinite = S.infinite; await saveLote(l);
   toast(`${aprov.length} transações aprovadas no período do lote (${txs.length - aprov.length} negadas/canceladas, ${fora} fora do período)`);
 }
+// hora que separa uma noite de show da seguinte (transação antes disso pertence ao show da véspera)
+const CORTE_H = 12;
 const titulo = s => String(s).toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase()).trim();
 const taxaEst = p => p.forma === 'debito' ? S.cfg.taxas.debito : p.forma === 'credito' ? (S.cfg.taxas['c' + Math.min(6, p.parcelas || 1)] || S.cfg.taxas.c1) : 0;
 // análise do extrato x PDV: totais por forma, bandeira, terminal, parcelas, show e conciliação venda a venda
@@ -942,7 +947,10 @@ function analiseInfinite(l) {
   const ap = inf.txs.filter(x => x.status.startsWith('aprov'));
   const soma = (arr, chave) => { const o = {}; arr.forEach(x => { const c = chave(x); const a = o[c] ||= { n: 0, valor: 0, liq: 0, taxa: 0 }; a.n++; a.valor += x.valor; a.liq += x.liq; a.taxa += x.taxa; }); return o; };
   const cartoes = ap.filter(x => x.forma !== 'pix');
-  const showDe = x => { const d = new Date(+new Date(x.t) - 6 * 3600e3); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); const dia = d.toISOString().slice(0, 10); const s = (l.shows || []).find(s => s.data === dia); return s ? `${s.cidade}/${s.uf}` : `fora dos shows (${fmtD(dia)})`; };
+  // show da transação: antes do meio-dia conta para a noite anterior; pega o show mais recente até 1 dia antes
+  const showDe = x => { const d = new Date(+new Date(x.t) - CORTE_H * 3600e3); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); const dia = d.toISOString().slice(0, 10);
+    const s = (l.shows || []).filter(s => s.data && s.data <= dia && (+new Date(dia) - +new Date(s.data)) <= 864e5).sort((a, b) => b.data.localeCompare(a.data))[0];
+    return s ? `${s.cidade}/${s.uf}` : `fora dos shows (${fmtD(dia)})`; };
   // conciliação: cada pagamento do PDV (exceto dinheiro) com a transação de mesma forma e valor mais próxima no tempo (até 30 min)
   const pags = []; vendasLote(l).forEach(v => v.pagamentos.filter(p => p.forma !== 'dinheiro').forEach(p => pags.push({ num: v.num, t: +new Date(v.ts), forma: p.forma, valor: p.valor, parcelas: p.parcelas || 1 })));
   const livre = ap.map(x => ({ ...x, tt: +new Date(x.t), usado: false })); const semTx = [];
