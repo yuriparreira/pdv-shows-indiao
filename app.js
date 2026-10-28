@@ -58,7 +58,8 @@ const DB = {
 
 // ---------- estado ----------
 const S = {
-  produtos: new Map(), lotes: [], vendas: [], movs: [], cfg: { vendedor: '', caixa: '', tema: 'dark', aparelho: '', cfopBonif: '5.910 / 6.910', cfopPerda: '5.927' },
+  produtos: new Map(), lotes: [], vendas: [], movs: [], cfg: { vendedor: '', caixa: '', tema: 'dark', aparelho: '', cfopBonif: '5.910 / 6.910', cfopPerda: '5.927',
+    taxas: { debito: 1.37, c1: 3.14, c2: 5.38, c3: 6.12, c4: 6.86, c5: 7.60, c6: 8.34 } }, tabela: {},
   view: 'home', loteId: null, tab: 'vender', busca: '', cat: '', todoCatalogo: false, esgotados: false,
   cart: [], cartDesc: 0, cartDescMotivo: '', pagamentos: [], sheet: null, contagemRevelada: false, infinite: null,
 };
@@ -243,8 +244,26 @@ async function lerCargaPdf(file, l) {
   const pedido = (t.match(/pedido\s*(?:de venda)?\s*(?:n[º°o.]*)?\s*[:#]?\s*(\d{3,})/i) || [])[1];
   S.sheet = { k: 'cargaPrev', carga: r.carga, nome: file.name, achados: r.achados.length, linhasNota: r.linhasNota, pedido }; renderSheet();
 }
-// preço de venda: o do pedido do lote no Tiny > preço de show do modelo > preço do cadastro
-const precoShow = p => (S.loteId && lote()?.precos?.[p.sku]) || p.precoShow || p.preco || 0;
+// Preço de venda = tabela "Shows e Eventos". Ordem: preço do pedido do lote (vem da tabela no Tiny) >
+// tabela importada > preço de show digitado no modelo > preço do ERP (último recurso, marcado como "ERP").
+function fontePreco(p) {
+  if (S.loteId && lote()?.precos?.[p.sku]) return ['pedido', lote().precos[p.sku]];
+  if (S.tabela[p.sku]) return ['tabela', S.tabela[p.sku]];
+  if (p.pai && S.tabela[p.pai]) return ['tabela', S.tabela[p.pai]];
+  if (p.precoShow) return ['manual', p.precoShow];
+  return ['erp', p.preco || 0];
+}
+const precoShow = p => fontePreco(p)[1];
+async function importarTabela(file) {
+  const abas = await lerPlanilha(file); let n = 0; const t = {};
+  for (const aba of abas) { const L = aba.linhas; if (!L.length) continue; const m = mapear(L);
+    const cp = m.vunit || m.preco || col(L[0], k => k.includes('preco') && !k.includes('custo') && !k.includes('promo'), k => k.startsWith('valor'));
+    if (!m.sku || !cp) continue;
+    L.forEach(r => { const sku = String(r[m.sku] || '').trim(); const v = num(r[cp]); if (sku && v > 0) { t[sku] = v; n++; } }); }
+  if (!n) throw new Error('Não achei as colunas de SKU e preço na tabela.');
+  S.tabela = t; await DB.put('meta', { k: 'tabela', v: t, em: now(), arq: file.name }); S.tabelaInfo = { em: now(), arq: file.name };
+  return n;
+}
 
 // ---------- cálculos do lote ----------
 const vendasLote = (l, incluirCanc) => S.vendas.filter(v => v.loteId === l.id && (incluirCanc || v.status !== 'cancelada'));
@@ -328,6 +347,8 @@ function vConfig() {
   <div class="card"><h2>Notas à parte (relatório)</h2>
   <label class="f">CFOP da bonificação<input class="i" name="cfopBonif" value="${esc(S.cfg.cfopBonif)}"></label>
   <label class="f">CFOP da perda de contagem<input class="i" name="cfopPerda" value="${esc(S.cfg.cfopPerda)}"></label></div>
+  <div class="card"><h2>Taxas estimadas da InfinitePay (%)</h2><p class="muted small">Usadas antes de importar o extrato. Débito, crédito à vista, 2x e 3x vêm do extrato de out/26; 4x a 6x são estimativa: confirme no app da InfinitePay.</p>
+  <div class="grid2">${[['debito', 'Débito'], ['c1', 'Crédito 1x'], ['c2', 'Crédito 2x'], ['c3', 'Crédito 3x'], ['c4', 'Crédito 4x'], ['c5', 'Crédito 5x'], ['c6', 'Crédito 6x']].map(([k, n]) => `<label class="f">${n}<input class="i" name="tx_${k}" inputmode="decimal" value="${String(S.cfg.taxas[k]).replace('.', ',')}"></label>`).join('')}</div></div>
   <button class="btn primary block">Salvar</button></form>
   <div class="card" style="margin-top:16px"><h2>Armazenamento</h2><p class="muted small" id="persist">Verificando…</p>
   <button class="btn block" data-a="backupTudo">Baixar backup completo</button></div>
@@ -341,14 +362,20 @@ function vCatalogo() {
   <label class="btn primary block">Importar planilha do Tiny<input type="file" accept=".xls,.xlsx,.csv" class="hide" data-in="catalogo"></label>
   <button class="btn block" style="margin-top:10px" data-a="baixarFotos">Guardar fotos para usar offline</button>
   <p class="muted small" id="fotosStatus"></p></div>
+  <div class="card"><h2>Tabela de preços "Shows e Eventos"</h2>
+  <p class="muted small">O preço de venda no show vem desta tabela (ou do pedido do lote), não do preço fixo do ERP. Aceita a exportação da lista de preços do Tiny ou qualquer planilha com SKU e preço. ${Object.keys(S.tabela).length ? `${Object.keys(S.tabela).length} SKUs na tabela${S.tabelaInfo ? ' · ' + esc(S.tabelaInfo.arq) + ' · ' + fmtDT(S.tabelaInfo.em) : ''}.` : '<b>Nenhuma tabela importada.</b>'}</p>
+  <label class="btn primary block">Importar tabela Shows e Eventos<input type="file" accept=".csv,.xls,.xlsx" class="hide" data-in="tabela"></label></div>
   <div class="card"><h2>Preço de show por modelo</h2><p class="muted small">Toque no preço para mudar. Vale para todas as cores e tamanhos do modelo. Vazio = preço do Tiny.</p>
   ${mods.map(m => `<div class="line"><div class="grow"><div style="font-weight:600">${esc(m.nome)}</div><div class="muted small">${m.skus.length} SKUs · Tiny ${brl(m.preco)}</div></div>
     <button class="btn" data-a="precoModelo" data-m="${esc(m.id)}">${m.precoShow ? brl(m.precoShow) : '—'}</button></div>`).join('') || '<div class="empty">Importe o catálogo.</div>'}
   </div></main>`;
 }
 function agrupar(ps) {
+  const pais = new Set([...S.produtos.values()].map(p => p.pai).filter(Boolean));
+  ps = ps.filter(p => !pais.has(p.sku)); // a linha do produto pai não é vendável; as variações são
   const g = new Map();
   ps.forEach(p => { const id = modeloDe(p); if (!g.has(id)) g.set(id, { id, nome: nomeModelo(p), img: '', cat: p.cat, preco: p.preco, precoShow: p.precoShow || 0, skus: [] }); const m = g.get(id); m.skus.push(p); if (!m.img && p.img) m.img = p.img; if (!m.cat && p.cat) m.cat = p.cat; });
+  g.forEach(m => { if (!m.img) m.img = S.produtos.get(m.id)?.img || ''; });
   g.forEach(m => { if (m.skus.length < 2) { m.skus.forEach(p => p._rot = rotulo(p)); return; }
     const ws = m.skus.map(p => (p.descricao || '').split(/\s+/)); let k = 0;
     while (ws.every(w => w[k] !== undefined && w[k] === ws[0][k])) k++;
@@ -373,6 +400,7 @@ function vLote() {
   return topo(l.pedido ? 'Pedido ' + l.pedido : 'Lote', sh ? `${sh.cidade}/${sh.uf} · ${fmtD(sh.data)}` : 'sem show', true,
     `<button class="iconbtn" data-a="sheetShow" aria-label="Trocar show">📍</button>`) +
     `<nav class="tabs">${tabs.map(([k, n]) => `<button class="tab ${S.tab === k ? 'on' : ''}" data-a="tab" data-t="${k}">${n}</button>`).join('')}</nav>
+    ${(S.tab === 'vender' || S.tab === 'vendas') && (l.shows || []).length ? `<div class="showbar">${l.shows.map(s => `<button class="showchip ${sh && sh.id === s.id ? 'on' : ''}" ${l.status === 'aberto' ? `data-a="usarShow" data-id="${s.id}"` : 'disabled'}>${sh && sh.id === s.id ? '📍 ' : ''}<b>${esc(s.cidade)}/${s.uf}</b><small>${fmtD(s.data).slice(0, 5)} · ${resumo(l, s.id).n} vendas</small></button>`).join('')}</div>` : ''}
     <main>${body}</main>${S.tab === 'vender' && !fechado ? cartBar() : ''}`;
 }
 function tVender(l) {
@@ -401,8 +429,9 @@ function tVender(l) {
     return `<button class="tile" data-a="abrirModelo" data-m="${esc(m.id)}" aria-label="${esc(m.nome)}, saldo ${saldo}">
       <div class="ph">${m.img ? `<img src="${esc(m.img)}" alt="" loading="lazy" onerror="this.remove()">` : esc(m.nome.slice(0, 2).toUpperCase())}</div>
       ${qc ? `<span class="q">${qc}</span>` : ''}<span class="s ${saldo <= 0 ? 'zero' : ''}">${saldo}</span>
-      <div class="t"><div class="muted small" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(curto(m.nome)[0])}</div><div class="n">${esc(curto(m.nome)[1])}</div><div class="p">${pr ? brl(pr) : '<span class="muted">sem preço</span>'}</div></div></button>`; }).join('') || '<div class="empty">Nada encontrado.</div>'}</div>`;
+      <div class="t"><div class="muted small" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(curto(m.nome)[0])}</div><div class="n">${esc(curto(m.nome)[1])}</div><div class="p">${pr ? brl(pr) : '<span class="muted">sem preço</span>'}${pr && fontePreco(m.skus[0])[0] === 'erp' ? ' <span class="pill" title="Sem preço na tabela Shows e Eventos">ERP</span>' : ''}</div></div></button>`; }).join('') || '<div class="empty">Nada encontrado.</div>'}</div>`;
 }
+const foto = (src, cls) => `<span class="${cls}">${src ? `<img src="${esc(src)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>`;
 function cartBar() {
   const itens = S.cart.reduce((a, c) => a + c.qtd, 0); const tot = S.cart.reduce((a, c) => a + c.qtd * c.preco, 0) - S.cartDesc;
   return `<div class="cartbar"><div class="inner">
@@ -436,8 +465,8 @@ function tContagem(l) {
   if (l.status === 'fechado' || S.contagemRevelada) return divergencias(l, sd);
   return `<div class="card"><h2>Contagem de retorno (às cegas)</h2><p class="muted small">Conte o que voltou para a caixa, peça por peça. O app não mostra o esperado durante a contagem, para não influenciar. SKU sem número = não contado.</p>
   <div class="row"><span class="grow">${contados} de ${skus.length} SKUs contados</span>${l.status === 'aberto' ? `<button class="btn" style="min-height:44px" data-a="iniciarContagem">Travar vendas</button>` : '<span class="pill contagem">vendas travadas</span>'}</div></div>
-  ${mods.map(m => `<div class="card"><h2>${esc(m.nome)}</h2>${m.skus.sort((a, b) => (a.var?.Cor || '').localeCompare(b.var?.Cor || '') || tamIdx(a.var?.Tamanho) - tamIdx(b.var?.Tamanho)).map(p => `<div class="line">
-    <div class="grow"><div style="font-weight:700">${esc([p.var?.Cor, p.var?.Tamanho].filter(Boolean).join(' · ') || p.sku)}</div><div class="muted small">${esc(p.sku)}</div></div>
+  ${mods.map(m => `<div class="card"><div class="row" style="margin-bottom:6px">${foto(m.img, 'thumb lg')}<h2 class="grow" style="margin:0">${esc(m.nome)}</h2></div>${m.skus.sort((a, b) => (a.var?.Cor || '').localeCompare(b.var?.Cor || '') || tamIdx(a.var?.Tamanho) - tamIdx(b.var?.Tamanho)).map(p => `<div class="line">
+    ${foto(p.img || m.img, 'thumb')}<div class="grow"><div style="font-weight:700">${esc([p.var?.Cor, p.var?.Tamanho].filter(Boolean).join(' · ') || p._rot || p.sku)}</div><div class="muted small">${esc(p.sku)}</div></div>
     <div class="stepper"><button data-a="ret" data-s="${esc(p.sku)}" data-d="-1">−</button><input inputmode="numeric" data-in="ret" data-s="${esc(p.sku)}" value="${ret[p.sku] ?? ''}" placeholder="–"><button data-a="ret" data-s="${esc(p.sku)}" data-d="1">+</button></div></div>`).join('')}</div>`).join('')}
   <button class="btn primary block" data-a="revelar">Terminei: ver divergências</button>`;
 }
@@ -456,10 +485,28 @@ function divergencias(l, sd) {
     ${l.status !== 'fechado' ? `<input class="i" style="width:100%;margin-top:10px" data-in="obsDif" data-s="${esc(x.s)}" value="${esc((l.obsDif || {})[x.s] || '')}" placeholder="Observação (obrigatória)">
     <div class="chips">${['Bonificação não lançada', 'Venda não registrada', 'Perda / furto', 'Avaria', 'SKU trocado na venda', 'Erro na carga'].map(c => `<button class="chip" data-a="obsChip" data-s="${esc(x.s)}" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>`
     : `<div class="small" style="margin-top:6px">Obs.: ${esc((l.obsDif || {})[x.s] || '—')}</div>`}</div>`).join('')}
-  <div class="card"><table class="t"><thead><tr><th>SKU</th><th>Carga</th><th>Vend.</th><th>Bonif.</th><th>Esper.</th><th>Cont.</th><th>Dif.</th></tr></thead><tbody>
+  <div class="card tw"><table class="t"><thead><tr><th>SKU</th><th>Carga</th><th>Vend.</th><th>Bonif.</th><th>Esper.</th><th>Cont.</th><th>Dif.</th></tr></thead><tbody>
   ${linhas.sort((a, b) => a.dif - b.dif || a.s.localeCompare(b.s)).map(x => `<tr><td>${esc(x.s)}</td><td>${x.carga}</td><td>${x.vendido}</td><td>${x.mov}</td><td>${x.saldo}</td><td>${x.ret ?? '–'}</td><td class="${x.dif < 0 ? 'neg' : x.dif > 0 ? 'pos' : 'zerot'}">${x.dif > 0 ? '+' : ''}${x.dif}</td></tr>`).join('')}
   </tbody></table></div>
   ${l.status !== 'fechado' ? `<div class="grid2"><button class="btn" data-a="recontar">Voltar e recontar</button><button class="btn ok" data-a="fecharLote">Fechar lote</button></div>` : `<div class="muted small">Lote fechado em ${fmtDT(l.fechadoEm)} por ${esc(l.fechadoPor)}.</div>`}`;
+}
+function tabelaGrupo(o, titulo, comTaxa = true) {
+  const ks = Object.entries(o).sort((a, b) => b[1].valor - a[1].valor); if (!ks.length) return '';
+  return `<div class="tw"><table class="t" style="margin:8px 0"><thead><tr><th>${titulo}</th><th>Qtd</th><th>Bruto</th>${comTaxa ? '<th>Taxa</th><th>%</th><th>Líquido</th>' : ''}</tr></thead><tbody>
+  ${ks.map(([k, x]) => `<tr><td>${esc(k)}</td><td>${x.n}</td><td>${brl(x.valor)}</td>${comTaxa ? `<td>${brl(x.taxa)}</td><td>${x.valor ? (x.taxa / x.valor * 100).toFixed(2).replace('.', ',') : '0'}%</td><td>${brl(x.liq)}</td>` : ''}</tr>`).join('')}</tbody></table></div>`;
+}
+function cardInfinite(l) {
+  const a = analiseInfinite(l); if (!a) return '';
+  return `<div class="card"><h2>Conferência InfinitePay</h2>
+  <div class="kpis"><div class="kpi"><b>${brl(a.bruto)}</b><span>bruto aprovado</span></div><div class="kpi"><b>${brl(a.taxa)}</b><span>taxas (${a.brutoCartao ? (a.taxa / a.brutoCartao * 100).toFixed(2).replace('.', ',') : 0}% dos cartões)</span></div>
+  <div class="kpi"><b>${brl(a.liq)}</b><span>líquido a receber</span></div><div class="kpi"><b class="${a.semPdv.length || a.semTx.length ? 'neg' : 'zerot'}">${a.conciliadas}/${a.pags}</b><span>pagamentos do PDV conciliados</span></div></div>
+  ${a.semPdv.length ? `<div class="warn" style="margin-top:12px"><b>${a.semPdv.length} transações sem venda no PDV</b> (${brl(a.semPdv.reduce((x, t) => x + t.valor, 0))}): venda não registrada ou valor diferente.<br>${a.semPdv.slice(0, 8).map(t => `${fmtDT(t.t)} · ${FORMA[t.forma]} ${brl(t.valor)} · ${esc(t.term)}`).join('<br>')}${a.semPdv.length > 8 ? '<br>…' : ''}</div>` : ''}
+  ${a.semTx.length ? `<div class="warn"><b>${a.semTx.length} pagamentos do PDV sem transação</b>: confira valor e forma.<br>${a.semTx.slice(0, 8).map(p => `Venda #${p.num} · ${FORMA[p.forma]} ${brl(p.valor)}`).join('<br>')}</div>` : ''}
+  ${a.negadas.length ? `<p class="small muted">${a.negadas.length} negadas/canceladas na maquininha (não entram nos totais).</p>` : ''}
+  <h2 style="margin-top:12px">Por origem</h2>${tabelaGrupo(a.porTerm, 'Origem')}
+  <h2>Por bandeira</h2>${tabelaGrupo(a.porBand, 'Bandeira')}
+  ${Object.keys(a.porParc).length ? `<h2>Crédito por parcelas</h2>${tabelaGrupo(a.porParc, 'Parcelas')}` : ''}
+  <h2>Por show (pela data da transação)</h2>${tabelaGrupo(a.porShow, 'Show')}</div>`;
 }
 function tRelatorio(l) {
   const r = resumo(l); const sh = l.shows || [];
@@ -470,7 +517,8 @@ function tRelatorio(l) {
     ${r.desc ? `<p class="small muted">Descontos: ${brl(r.desc)} sobre ${brl(r.bruto)} brutos.</p>` : ''}</div>
   <div class="card"><h2>Por forma de pagamento</h2>${FORMAS.map(f => `<div class="line"><span class="grow">${f.nome}</span><b>${brl(r.formas[f.id] || 0)}</b>${inf && f.id !== 'dinheiro' ? `<span class="small ${Math.abs((inf.formas[f.id] || 0) - (r.formas[f.id] || 0)) > 0.5 ? 'neg' : 'zerot'}" style="min-width:110px;text-align:right">InfinitePay ${brl(inf.formas[f.id] || 0)}</span>` : ''}</div>`).join('')}
     <label class="btn block" style="margin-top:10px">${inf ? 'Trocar' : 'Conferir com'} extrato da InfinitePay<input type="file" accept=".xls,.xlsx,.csv" class="hide" data-in="infinite"></label>
-    ${inf ? `<p class="small muted">${inf.n} transações aprovadas entre ${fmtDT(inf.de)} e ${fmtDT(inf.ate)}.</p>` : '<p class="small muted">Exporte as transações do período no app da InfinitePay e importe aqui para conferir Pix, crédito e débito.</p>'}</div>
+    ${inf ? `<p class="small muted">${inf.n} transações aprovadas entre ${fmtDT(inf.de)} e ${fmtDT(inf.ate)}.</p>` : `<p class="small muted">Exporte as transações do período no app da InfinitePay e importe aqui. Taxas estimadas pelo PDV: <b>${brl(taxasPdv(l))}</b> (líquido estimado ${brl(r.liq - taxasPdv(l))}).</p>`}</div>
+  ${cardInfinite(l)}
   <div class="card"><h2>Por show</h2>${sh.map(s => { const x = resumo(l, s.id); return `<div class="line"><div class="grow"><b>${esc(s.cidade)}/${s.uf}</b><div class="muted small">${fmtD(s.data)}${s.evento ? ' · ' + esc(s.evento) : ''}</div></div><div style="text-align:right"><b>${brl(x.liq)}</b><div class="muted small">${x.n} vendas · ${x.pecas} pç</div></div></div>`; }).join('')}</div>
   ${l.status !== 'fechado' ? '<div class="warn">O relatório final sai depois da contagem e do fechamento. Antes disso, é parcial.</div>' : ''}
   <button class="btn primary block" data-a="pdf">Gerar PDF ${l.status === 'fechado' ? 'final' : 'parcial'}</button>
@@ -534,7 +582,7 @@ function shShow() {
   const l = lote(); const at = showAtual(l);
   return `<div class="row"><h3 class="grow">Show atual</h3><button class="iconbtn" data-a="fechar">✕</button></div>
   <p class="muted small">As vendas entram no show marcado. Troque ao chegar na próxima cidade; a carga continua a mesma do lote.</p>
-  ${(l.shows || []).map(s => `<button class="card" style="width:100%;text-align:left;${at && at.id === s.id ? 'border-color:var(--orange)' : ''}" data-a="usarShow" data-id="${s.id}"><b>${esc(s.cidade)}/${s.uf}</b> · ${fmtD(s.data)}<div class="muted small">${esc(s.evento || '')}</div></button>`).join('')}
+  ${(l.shows || []).map(s => `<button class="card" style="width:100%;text-align:left;${at && at.id === s.id ? 'border:2px solid var(--orange)' : ''}" data-a="usarShow" data-id="${s.id}"><div class="row"><b class="grow">${at && at.id === s.id ? '📍 ' : ''}${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</b>${at && at.id === s.id ? '<span class="pill aberto">ATUAL</span>' : ''}</div><div class="muted small">${esc(s.evento || '')}</div></button>`).join('')}
   ${l.status === 'aberto' ? `<form data-f="novoShow" class="card"><h2>Adicionar show</h2>
     <label class="f">Cidade<input class="i" name="cidade" required></label>
     <div class="grid2"><label class="f">UF<select class="i" name="uf" required><option value="">--</option>${UFS.map(u => `<option ${at && at.uf === u ? 'selected' : ''}>${u}</option>`).join('')}</select></label><label class="f">Data<input class="i" type="date" name="data" value="${today()}" required></label></div>
@@ -690,7 +738,7 @@ async function salvarMov(fd) {
 document.addEventListener('submit', async ev => {
   const f = ev.target; const k = f.dataset.f; if (!k) return; ev.preventDefault(); const fd = new FormData(f);
   if (k === 'texto') { const r = S.sheet.res; const v = fd.get('v'); S.sheet = null; r && r(v); return; }
-  if (k === 'cfg') { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); await saveCfg(); S.view = 'home'; render(); toast('Salvo'); }
+  if (k === 'cfg') { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); }); await saveCfg(); S.view = 'home'; render(); toast('Salvo'); }
   if (k === 'novoLote') {
     if (!S.cfg.vendedor) { S.cfg.vendedor = fd.get('resp'); saveCfg(); }
     const cs = fd.getAll('cidade'), us = fd.getAll('uf'), ds = fd.getAll('data'), es = fd.getAll('evento');
@@ -717,6 +765,7 @@ document.addEventListener('change', async ev => {
     if (t.dataset.in === 'catalogo') { const r = await importarCatalogo(f); toast(`${r.n} SKUs importados (${r.novos} novos)`); render(); }
     if (t.dataset.in === 'carga' && /\.pdf$/i.test(f.name)) { await lerCargaPdf(f, lote()); t.value = ''; return; }
     if (t.dataset.in === 'carga') { const r = await importarCarga(f, lote()); toast(`Carga: ${r.pecas} peças em ${r.linhas} SKUs${r.semCadastro ? ` · ${r.semCadastro} sem cadastro` : ''}`); render(); }
+    if (t.dataset.in === 'tabela') { const n = await importarTabela(f); toast(`Tabela Shows e Eventos: ${n} preços`); render(); }
     if (t.dataset.in === 'infinite') { await lerInfinite(f, lote()); render(); }
   } catch (e) { console.error(e); toast(e.message || 'Não consegui ler o arquivo', null, true); }
   t.value = '';
@@ -729,17 +778,56 @@ function bindRecebido(v) {
 async function lerInfinite(file, l) {
   const abas = await lerPlanilha(file); const aba = abas.find(a => a.linhas.length && col(a.linhas[0], k => k.includes('meio')) && col(a.linhas[0], k => k.startsWith('valor')));
   if (!aba) throw new Error('Não achei as colunas "Meio" e "Valor (R$)" do extrato da InfinitePay.');
-  const r0 = aba.linhas[0]; const cMeio = col(r0, k => k === 'meio - meio', k => k.includes('meio')); const cVal = col(r0, k => k.startsWith('valor')); const cSt = col(r0, k => k === 'status'); const cDt = col(r0, k => k.startsWith('data'));
-  if (!cMeio || !cVal) throw new Error('Não achei as colunas "Meio" e "Valor (R$)" do extrato.');
-  const vs = vendasLote(l); const ts = vs.map(v => +new Date(v.ts)).sort((a, b) => a - b);
-  const de = ts.length ? ts[0] - 3 * 3600e3 : 0, ate = ts.length ? ts[ts.length - 1] + 3 * 3600e3 : Infinity;
+  const r0 = aba.linhas[0]; const c = (...t) => col(r0, ...t);
+  const k = { meio: c(k => k === 'meio - meio', k => k.includes('meio') && !k.includes('bandeira') && !k.includes('parcela')), band: c(k => k.includes('bandeira')), parc: c(k => k.includes('parcela')),
+    orig: c(k => k === 'tipo - origem'), dados: c(k => k.includes('dados adicionais')), st: c(k => k === 'status'), val: c(k => k.startsWith('valor')), liq: c(k => k.startsWith('liquido') || k.startsWith('lquido') || k.includes('quido')),
+    dt: c(k => k.startsWith('data')), nome: c(k => k === 'origem - nome'), id: c(k => k === 'identificador') };
   const dt = x => { if (x instanceof Date) return +x; if (typeof x === 'number') return Math.round((x - 25569) * 864e5) + new Date().getTimezoneOffset() * 6e4; const m = String(x).match(/(\d{2})\/(\d{2})\/(\d{4})[ T]?(\d{2})?:?(\d{2})?/); if (m) return +new Date(+m[3], m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0)); return +new Date(x); };
-  const formas = {}; let n = 0;
-  aba.linhas.forEach(r => { if (cSt && norm(r[cSt]) && !norm(r[cSt]).startsWith('aprov')) return; const t = cDt ? dt(r[cDt]) : 0; if (cDt && (t < de || t > ate)) return; const m = norm(r[cMeio]); const f = m.startsWith('pix') ? 'pix' : m.startsWith('cr') ? 'credito' : m.startsWith('d') ? 'debito' : null; if (!f) return; formas[f] = (formas[f] || 0) + num(r[cVal]); n++; });
-  S.infinite = { loteId: l.id, formas, n, de: new Date(de).toISOString(), ate: isFinite(ate) ? new Date(ate).toISOString() : now() };
+  // janela do lote: vendas do PDV ±3h; sem vendas, as datas dos shows (do meio-dia ao dia seguinte às 8h)
+  const ts = vendasLote(l).map(v => +new Date(v.ts)).sort((a, b) => a - b); const ds = (l.shows || []).map(s => s.data).sort();
+  let de = 0, ate = Infinity;
+  if (ts.length) { de = ts[0] - 3 * 3600e3; ate = ts[ts.length - 1] + 3 * 3600e3; }
+  else if (ds.length) { de = +new Date(ds[0] + 'T12:00'); ate = +new Date(ds[ds.length - 1] + 'T12:00') + 20 * 3600e3; }
+  const formaDe = m => m.startsWith('pix') ? 'pix' : m.startsWith('cr') ? 'credito' : m.startsWith('d') ? 'debito' : null;
+  const txs = []; let fora = 0;
+  aba.linhas.forEach(r => {
+    const t = k.dt ? dt(r[k.dt]) : 0; if (k.dt && (t < de || t > ate)) { fora++; return; }
+    const forma = formaDe(norm(r[k.meio])); if (!forma) return;
+    const valor = num(r[k.val]); const liq = k.liq ? num(r[k.liq]) : valor;
+    const dados = String(r[k.dados] || '').replace(/^'/, '').trim();
+    const origem = String(r[k.orig] || '').trim(); const serial = (dados.match(/NS:\s*(\S+)/) || [])[1]; const mv = (dados.match(/MV:\s*(.+)/) || [])[1];
+    const term = origem.toLowerCase().startsWith('maquin') ? `Maquininha …${(serial || '').slice(-4)}` : origem.toLowerCase().includes('tap') ? `InfiniteTap · ${titulo(mv || '?')}` : `Pix na conta${mv ? ' · ' + titulo(mv) : ''}`;
+    const parc = String(r[k.parc] || '').toLowerCase().includes('vista') ? 1 : (parseInt(r[k.parc]) || 1);
+    txs.push({ t: new Date(t).toISOString(), forma, band: String(r[k.band] || '').toLowerCase(), parc, origem, term, status: norm(r[k.st]), valor, liq, taxa: +(valor - liq).toFixed(2), id: String(r[k.id] || ''), nome: String(r[k.nome] || '') });
+  });
+  const aprov = txs.filter(x => x.status.startsWith('aprov'));
+  const formas = {}; aprov.forEach(x => formas[x.forma] = (formas[x.forma] || 0) + x.valor);
+  S.infinite = { loteId: l.id, formas, n: aprov.length, de: new Date(de || Date.now()).toISOString(), ate: isFinite(ate) ? new Date(ate).toISOString() : now(), txs, fora, arq: file.name };
   l.conferenciaInfinite = S.infinite; await saveLote(l);
-  toast(`${n} transações lidas da InfinitePay`);
+  toast(`${aprov.length} transações aprovadas no período do lote (${txs.length - aprov.length} negadas/canceladas, ${fora} fora do período)`);
 }
+const titulo = s => String(s).toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase()).trim();
+const taxaEst = p => p.forma === 'debito' ? S.cfg.taxas.debito : p.forma === 'credito' ? (S.cfg.taxas['c' + Math.min(6, p.parcelas || 1)] || S.cfg.taxas.c1) : 0;
+// análise do extrato x PDV: totais por forma, bandeira, terminal, parcelas, show e conciliação venda a venda
+function analiseInfinite(l) {
+  const inf = l.conferenciaInfinite; if (!inf || !inf.txs) return null;
+  const ap = inf.txs.filter(x => x.status.startsWith('aprov'));
+  const soma = (arr, chave) => { const o = {}; arr.forEach(x => { const c = chave(x); const a = o[c] ||= { n: 0, valor: 0, liq: 0, taxa: 0 }; a.n++; a.valor += x.valor; a.liq += x.liq; a.taxa += x.taxa; }); return o; };
+  const cartoes = ap.filter(x => x.forma !== 'pix');
+  const showDe = x => { const d = new Date(+new Date(x.t) - 6 * 3600e3); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); const dia = d.toISOString().slice(0, 10); const s = (l.shows || []).find(s => s.data === dia); return s ? `${s.cidade}/${s.uf}` : `fora dos shows (${fmtD(dia)})`; };
+  // conciliação: cada pagamento do PDV (exceto dinheiro) com a transação de mesma forma e valor mais próxima no tempo (até 30 min)
+  const pags = []; vendasLote(l).forEach(v => v.pagamentos.filter(p => p.forma !== 'dinheiro').forEach(p => pags.push({ num: v.num, t: +new Date(v.ts), forma: p.forma, valor: p.valor, parcelas: p.parcelas || 1 })));
+  const livre = ap.map(x => ({ ...x, tt: +new Date(x.t), usado: false })); const semTx = [];
+  pags.sort((a, b) => a.t - b.t).forEach(p => {
+    let best = null; livre.forEach(x => { if (x.usado || x.forma !== p.forma || Math.abs(x.valor - p.valor) > 0.01) return; const d = Math.abs(x.tt - p.t); if (d <= 30 * 60e3 && (!best || d < Math.abs(best.tt - p.t))) best = x; });
+    if (best) best.usado = true; else semTx.push(p);
+  });
+  const semPdv = livre.filter(x => !x.usado);
+  return { ap, porForma: soma(ap, x => x.forma), porBand: soma(cartoes, x => x.band || '—'), porTerm: soma(ap, x => x.term), porParc: soma(ap.filter(x => x.forma === 'credito'), x => x.parc + 'x'),
+    porShow: soma(ap, showDe), taxa: ap.reduce((a, x) => a + x.taxa, 0), bruto: ap.reduce((a, x) => a + x.valor, 0), liq: ap.reduce((a, x) => a + x.liq, 0),
+    brutoCartao: cartoes.reduce((a, x) => a + x.valor, 0), negadas: inf.txs.filter(x => !x.status.startsWith('aprov')), semTx, semPdv, conciliadas: pags.length - semTx.length, pags: pags.length };
+}
+function taxasPdv(l) { let t = 0; vendasLote(l).forEach(v => v.pagamentos.forEach(p => t += p.valor * taxaEst(p) / 100)); return t; }
 
 // ---------- exportações ----------
 function baixar(nome, conteudo, tipo) {
@@ -838,7 +926,14 @@ function relatorioHTML(l) {
   <h2>Formas de pagamento</h2><table><thead><tr><th class="l">Forma</th><th>PDV</th>${inf ? '<th>InfinitePay</th><th>Diferença</th>' : ''}</tr></thead><tbody>
   ${FORMAS.map(f => { const a = r.formas[f.id] || 0; const b = inf ? (inf.formas[f.id] || 0) : 0; return `<tr><td class="l">${f.nome}</td><td>${brl(a)}</td>${inf ? (f.id === 'dinheiro' ? '<td>—</td><td>—</td>' : `<td>${brl(b)}</td><td class="${Math.abs(b - a) > .5 ? 'neg' : ''}">${brl(b - a)}</td>`) : ''}</tr>`; }).join('')}
   <tr><th class="l">Total</th><th>${brl(r.liq)}</th>${inf ? `<th>${brl(Object.values(inf.formas).reduce((a, b) => a + b, 0))}</th><th></th>` : ''}</tr></tbody></table>
-  ${inf ? `<p class="foot">Extrato InfinitePay: ${inf.n} transações aprovadas entre ${fmtDT(inf.de)} e ${fmtDT(inf.ate)}. Dinheiro não passa pela InfinitePay: conferir com o caixa físico.</p>` : ''}
+  ${inf ? `<p class="foot">Extrato InfinitePay: ${inf.n} transações aprovadas entre ${fmtDT(inf.de)} e ${fmtDT(inf.ate)}. Dinheiro não passa pela InfinitePay: conferir com o caixa físico.</p>` : `<p class="foot">Sem extrato da InfinitePay. Taxas estimadas pelo PDV: ${brl(taxasPdv(l))} · líquido estimado ${brl(r.liq - taxasPdv(l))}.</p>`}
+  ${(() => { const a = analiseInfinite(l); if (!a) return '';
+    const tab = (o, t) => { const ks = Object.entries(o).sort((x, y) => y[1].valor - x[1].valor); return ks.length ? `<table><thead><tr><th class="l">${t}</th><th>Qtd</th><th>Bruto</th><th>Taxa</th><th>%</th><th>Líquido</th></tr></thead><tbody>${ks.map(([k, x]) => `<tr><td class="l">${esc(k)}</td><td>${x.n}</td><td>${brl(x.valor)}</td><td>${brl(x.taxa)}</td><td>${x.valor ? (x.taxa / x.valor * 100).toFixed(2).replace('.', ',') : 0}%</td><td>${brl(x.liq)}</td></tr>`).join('')}</tbody></table>` : ''; };
+    return `<h2>Conferência InfinitePay</h2><div class="k"><div><b>${brl(a.bruto)}</b>bruto aprovado</div><div><b>${brl(a.taxa)}</b>taxas (${a.brutoCartao ? (a.taxa / a.brutoCartao * 100).toFixed(2).replace('.', ',') : 0}% dos cartões)</div><div><b>${brl(a.liq)}</b>líquido a receber</div><div><b>${a.conciliadas}/${a.pags}</b>pagamentos conciliados</div></div>
+    ${tab(a.porTerm, 'Origem (máquina / tap / Pix)')}${tab(a.porBand, 'Bandeira')}${Object.keys(a.porParc).length ? tab(a.porParc, 'Crédito por parcelas') : ''}${tab(a.porShow, 'Show (data da transação)')}
+    ${a.semPdv.length ? `<p><b class="neg">Transações sem venda no PDV (${a.semPdv.length}, ${brl(a.semPdv.reduce((x, t) => x + t.valor, 0))}):</b></p><table><tbody>${a.semPdv.map(t => `<tr><td class="l">${fmtDT(t.t)}</td><td class="l">${FORMA[t.forma]} ${esc(t.band)} ${t.parc > 1 ? t.parc + 'x' : ''}</td><td class="l">${esc(t.term)}</td><td>${brl(t.valor)}</td></tr>`).join('')}</tbody></table>` : ''}
+    ${a.semTx.length ? `<p><b class="neg">Pagamentos do PDV sem transação (${a.semTx.length}):</b> ${a.semTx.map(p => `#${p.num} ${FORMA[p.forma]} ${brl(p.valor)}`).join(' · ')}</p>` : ''}
+    ${a.negadas.length ? `<p class="foot">${a.negadas.length} transações negadas ou canceladas não entram nos totais.</p>` : ''}`; })()}
 
   <h2>Por show</h2><table><thead><tr><th class="l">Show</th><th>Vendas</th><th>Peças</th><th>Pix</th><th>Crédito</th><th>Débito</th><th>Dinheiro</th><th>Líquido</th></tr></thead><tbody>
   ${(l.shows || []).map(s => { const x = resumo(l, s.id); return `<tr><td class="l">${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</td><td>${x.n}</td><td>${x.pecas}</td>${FORMAS.map(f => `<td>${brl(x.formas[f.id] || 0)}</td>`).join('')}<td><b>${brl(x.liq)}</b></td></tr>`; }).join('')}</tbody></table>
@@ -881,7 +976,8 @@ addEventListener('online', render); addEventListener('offline', render);
   await DB.open();
   const [ps, ls, vs, ms, meta] = await Promise.all(['produtos', 'lotes', 'vendas', 'movs', 'meta'].map(s => DB.all(s)));
   ps.forEach(p => S.produtos.set(p.sku, p)); S.lotes = ls; S.vendas = vs; S.movs = ms;
-  const cfg = meta.find(m => m.k === 'cfg'); if (cfg) S.cfg = { ...S.cfg, ...cfg.v };
+  const tb = meta.find(m => m.k === 'tabela'); if (tb) { S.tabela = tb.v || {}; S.tabelaInfo = { em: tb.em, arq: tb.arq }; }
+  const cfg = meta.find(m => m.k === 'cfg'); if (cfg) S.cfg = { ...S.cfg, ...cfg.v, taxas: { ...S.cfg.taxas, ...(cfg.v.taxas || {}) } };
   if (!S.cfg.aparelho) { S.cfg.aparelho = uid(); saveCfg(); }
   render();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });

@@ -132,6 +132,19 @@ table.t th{color:var(--muted);font-weight:600;font-size:12px}
 .empty{text-align:center;color:var(--muted);padding:40px 10px}
 .warn{background:#3d2f10;border:1px solid #6b5418;color:#F2CF73;border-radius:12px;padding:12px;margin-bottom:12px;font-size:14px}
 .hide{display:none!important}
+/* show atual (visão sintética) */
+.showbar{display:flex;gap:8px;overflow-x:auto;padding:4px 16px 8px;scrollbar-width:none}
+.showchip{flex:0 0 auto;min-height:52px;padding:6px 14px;border-radius:14px;background:var(--surface2);border:1px solid var(--line);color:var(--muted);display:flex;flex-direction:column;align-items:flex-start;justify-content:center;text-align:left}
+.showchip b{font-size:15px;color:var(--text)}.showchip small{font-size:12px}
+.showchip.on{background:var(--orange);border-color:var(--orange);color:var(--on-orange)}.showchip.on b{color:var(--on-orange)}
+/* fotos na contagem */
+.thumb{flex:0 0 auto;width:48px;height:48px;border-radius:10px;overflow:hidden;background:var(--surface2);display:block}
+.thumb.lg{width:64px;height:64px}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.line .grow{min-width:0;overflow-wrap:anywhere}
+.tw{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table.t td,table.t th{white-space:nowrap}
+@media (max-width:400px){.stepper{gap:4px}.stepper button{width:44px}.stepper input{width:52px}}
 /* impressão (relatório PDF) */
 #print{display:none}
 @media print{
