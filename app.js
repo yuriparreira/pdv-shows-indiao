@@ -11,13 +11,17 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString
 const now = () => new Date().toISOString();
 const fmtDT = iso => iso ? new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
 const fmtD = d => d ? d.split('-').reverse().join('/') : '';
+// data da "noite" do show: antes do meio-dia ainda é a noite de ontem (CORTE_H)
+const dataNoite = () => { const d = new Date(Date.now() - 12 * 3600e3); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
 const today = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
 const norm = s => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7e]/g, '').toLowerCase().trim();
 const vibrate = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) { } };
 const UFS = 'AC AL AM AP BA CE DF ES GO MA MG MS MT PA PB PE PI PR RJ RN RO RR RS SC SE SP TO'.split(' ');
 const FORMAS = [
   { id: 'pix', nome: 'Pix', cls: 'pix' }, { id: 'credito', nome: 'Crédito', cls: 'cre' },
-  { id: 'debito', nome: 'Débito', cls: 'deb' }, { id: 'dinheiro', nome: 'Dinheiro', cls: 'din' }];
+  { id: 'debito', nome: 'Débito', cls: 'deb' }, { id: 'dinheiro', nome: 'Dinheiro', cls: 'din' },
+  { id: 'outro', nome: 'Outro meio', cls: 'out' }]; // Pix de outro banco, Mercado Pago etc. (fora da InfinitePay)
+const FORA_INFINITE = ['dinheiro', 'outro'];
 const FORMA = Object.fromEntries(FORMAS.map(f => [f.id, f.nome]));
 const MOV_TIPOS = [
   { id: 'bonificacao', nome: 'Bonificação (palco)', dica: 'Indião jogou no show' },
@@ -421,7 +425,8 @@ function vNovo() {
   <label class="f">Nº do pedido no Tiny (cliente "Shows e Eventos")<input class="i" name="pedido" inputmode="numeric" placeholder="ex.: 4821"></label>
   <label class="f">Responsável pela carga<input class="i" name="resp" value="${esc(S.cfg.vendedor)}" required></label>
   <label class="f">Equipe de venda<input class="i" name="equipe" placeholder="ex.: Jonathas, Luquinhas"></label>
-  <div id="shows">${blocoShow(1, today())}</div>
+  <div id="shows">${blocoShow(1, dataNoite())}</div>
+  <p class="muted small">A data do show é a da noite em que ele começou. Show que começa depois da meia-noite usa a data da véspera.</p>
   <button type="button" class="btn block" data-a="maisShow" style="margin-bottom:12px">+ Adicionar outro show deste lote</button>
   <button class="btn primary block">Criar lote</button>
   <p class="muted small">Depois de criar, importe a carga (planilha do pedido ou o modelo "Vendas em Shows") ou conte a carga no app.</p>
@@ -496,12 +501,13 @@ const rotulo = p => [p.var?.Cor, p.var?.Tamanho].filter(Boolean).join(' · ') ||
 function vLote() {
   const l = lote(); if (!l) { S.view = 'home'; return vHome(); }
   const sh = showAtual(l); const fechado = l.status !== 'aberto';
-  const tabs = [['vender', 'Vender'], ['vendas', 'Vendas'], ['movs', 'Bonificações'], ['contagem', 'Contagem'], ['relatorio', 'Relatório']];
+  const tabs = [['vender', 'Vender'], ['vendas', 'Vendas'], ['movs', 'Bonificações'], ['contagem', 'Contagem'], ['financeiro', 'Financeiro'], ['relatorio', 'Relatório']];
   let body = '';
   if (S.tab === 'vender') body = fechado ? `<div class="warn">${l.status === 'fechado' ? 'Lote fechado. Veja o Relatório.' : 'Vendas travadas para a contagem. Termine a contagem na aba Contagem.'}</div>${l.status === 'contagem' ? '<button class="btn block" data-a="destravar">Destravar vendas (zera a contagem)</button>' : ''}` : tVender(l);
   if (S.tab === 'vendas') body = tVendas(l);
   if (S.tab === 'movs') body = tMovs(l);
   if (S.tab === 'contagem') body = tContagem(l);
+  if (S.tab === 'financeiro') body = tFinanceiro(l);
   if (S.tab === 'relatorio') body = tRelatorio(l);
   return topo(l.pedido ? 'Pedido ' + l.pedido : 'Lote', sh ? `${sh.cidade}/${sh.uf} · ${fmtD(sh.data)}` : 'sem show', true,
     `<button class="iconbtn" data-a="sheetShow" aria-label="Trocar show">📍</button>`) +
@@ -516,6 +522,7 @@ function tVender(l) {
     <p class="muted small">No Tiny: Vendas › Pedidos de venda › marque o pedido "Shows e Eventos" › Exportar. O app lê SKU, quantidade e o preço de show do pedido.</p>
     <label class="btn block">Importar PDF do pedido ou da nota<input type="file" accept=".pdf,application/pdf" class="hide" data-in="carga"></label>
     <button class="btn block" style="margin-top:10px" data-a="contarCarga">Contar a carga no app</button></div>`;
+  const aviso = alertaData(l);
   const sd = saldos(l); const noCart = {}; S.cart.forEach(c => noCart[c.sku] = (noCart[c.sku] || 0) + c.qtd);
   let ps = [...S.produtos.values()]; if (!S.todoCatalogo) ps = ps.filter(p => sd[p.sku]?.carga);
   const mods = agrupar(ps); const cats = [...new Set(mods.map(m => m.cat).filter(Boolean))].sort();
@@ -526,7 +533,7 @@ function tVender(l) {
   vis.sort((a, b) => (!precoShow(a.skus[0])) - (!precoShow(b.skus[0])) || vend(b) - vend(a) || a.nome.localeCompare(b.nome));
   const temSaldo = m => m.skus.some(p => (sd[p.sku]?.saldo || 0) > 0);
   const nEsg = vis.filter(m => !temSaldo(m)).length; const lista = (S.esgotados || S.todoCatalogo) ? vis : vis.filter(temSaldo);
-  return `<div class="search"><input class="i" style="width:100%" type="search" placeholder="Buscar modelo ou SKU" value="${esc(S.busca)}" data-in="busca" enterkeyhint="search"></div>
+  return aviso + `<div class="search"><input class="i" style="width:100%" type="search" placeholder="Buscar modelo ou SKU" value="${esc(S.busca)}" data-in="busca" enterkeyhint="search"></div>
   <div class="chips"><button class="chip ${!S.cat ? 'on' : ''}" data-a="cat" data-c="">Todos</button>${cats.map(c => `<button class="chip ${S.cat === c ? 'on' : ''}" data-a="cat" data-c="${esc(c)}">${esc(c)}</button>`).join('')}
   ${nEsg && !S.todoCatalogo ? `<button class="chip ${S.esgotados ? 'on' : ''}" data-a="esgotados">Esgotados (${nEsg})</button>` : ''}
   <button class="chip ${S.todoCatalogo ? 'on' : ''}" data-a="todoCat">Fora da carga</button></div>
@@ -538,6 +545,17 @@ function tVender(l) {
       <div class="t"><div class="muted small" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(curto(m.nome)[0])}</div><div class="n">${esc(curto(m.nome)[1])}</div><div class="p">${pr ? brl(pr) : '<span class="muted">sem preço</span>'}${pr && fontePreco(m.skus[0])[0] === 'erp' ? ' <span class="pill" title="Sem preço na tabela Shows e Eventos">ERP</span>' : ''}</div></div></button>`; }).join('') || '<div class="empty">Nada encontrado.</div>'}</div>`;
 }
 const foto = (src, cls) => `<span class="${cls}">${src ? `<img src="${esc(src)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>`;
+// avisa quando a data do show atual não bate com a noite de agora (show esquecido ou data do calendário)
+function alertaData(l) {
+  const sh = showAtual(l); if (!sh?.data || l.status !== 'aberto') return '';
+  const dn = dataNoite(); if (sh.data === dn || (sh.dataConferida || '') === dn) return '';
+  const outro = (l.shows || []).find(s => s.data === dn && s.id !== sh.id);
+  const txt = sh.data > dn ? `O show atual (${esc(sh.cidade)}) está com data ${fmtD(sh.data)}, mas agora ainda é a noite de ${fmtD(dn)}. Show que começa depois da meia-noite usa a data da véspera.`
+    : `O show atual (${esc(sh.cidade)}) é de ${fmtD(sh.data)}, mas agora é a noite de ${fmtD(dn)}.`;
+  return `<div class="warn">⚠ ${txt}<div class="grid2" style="margin-top:8px">
+    ${outro ? `<button class="btn" style="min-height:44px" data-a="usarShow" data-id="${outro.id}">Usar ${esc(outro.cidade)}/${outro.uf}</button>` : `<button class="btn" style="min-height:44px" data-a="corrigirData" data-d="${dn}">Mudar para ${fmtD(dn)}</button>`}
+    <button class="btn" style="min-height:44px" data-a="dataCerta" data-d="${dn}">A data está certa</button></div></div>`;
+}
 function cartBar() {
   const itens = S.cart.reduce((a, c) => a + c.qtd, 0); const tot = S.cart.reduce((a, c) => a + c.qtd * c.preco, 0) - S.cartDesc;
   return `<div class="cartbar"><div class="inner">
@@ -551,7 +569,7 @@ function tVendas(l) {
     return `<div class="card" style="${v.status === 'cancelada' ? 'opacity:.55' : ''}"><div class="row"><b class="grow">#${v.num} · ${fmtDT(v.ts)}</b><b>${brl(t.liq)}</b></div>
     <div class="small muted">${esc(shows[v.showId]?.cidade || '')} · ${esc(v.vendedor)} · ${esc(v.caixa)}</div>
     <div class="small" style="margin:6px 0">${v.itens.map(i => `${i.qtd}× ${esc(S.produtos.get(i.sku)?.descricao || i.sku)} (${brl(i.preco)})`).join('<br>')}</div>
-    <div class="small">${v.pagamentos.map(p => FORMA[p.forma] + ' ' + brl(p.valor) + (p.parcelas > 1 ? ` ${p.parcelas}x` : '')).join(' + ')}${v.desconto ? ` · desconto ${brl(v.desconto)} (${esc(v.descMotivo || 'sem motivo')})` : ''}${v.troco ? ` · troco ${brl(v.troco)}` : ''}</div>
+    <div class="small">${v.pagamentos.map(p => (p.nome || FORMA[p.forma]) + ' ' + brl(p.valor) + (p.parcelas > 1 ? ` ${p.parcelas}x` : '')).join(' + ')}${v.desconto ? ` · desconto ${brl(v.desconto)} (${esc(v.descMotivo || 'sem motivo')})` : ''}${v.troco ? ` · troco ${brl(v.troco)}` : ''}</div>
     ${v.status === 'cancelada' ? `<div class="small neg">Cancelada: ${esc(v.motivoCanc)}</div>` : (l.status !== 'fechado' ? `<button class="btn danger" style="margin-top:8px;min-height:44px" data-a="cancelarVenda" data-id="${v.id}">Cancelar venda</button>` : '')}</div>`; }).join('') || '<div class="empty">Nenhuma venda ainda.</div>');
 }
 function tMovs(l) {
@@ -616,6 +634,68 @@ function cardInfinite(l) {
   ${Object.keys(a.porParc).length ? `<h2>Crédito por parcelas</h2>${tabelaGrupo(a.porParc, 'Parcelas')}` : ''}
   <h2>Por show (pela data da transação)</h2>${tabelaGrupo(a.porShow, 'Show')}</div>`;
 }
+// ---------- conferência financeira: recebido de verdade x PDV, com diferença justificada ----------
+const CATS_AJ = [
+  { id: 'desconto', nome: 'Desconto não lançado', dir: 'menos', venda: true },
+  { id: 'venda_nr', nome: 'Venda não registrada no app', dir: 'mais', venda: true, sku: true },
+  { id: 'preco', nome: 'Preço lançado errado', dir: '', venda: true },
+  { id: 'estorno', nome: 'Estorno / cancelamento na maquininha', dir: 'menos', venda: true },
+  { id: 'troco', nome: 'Quebra de caixa / troco errado', dir: 'menos', venda: false },
+  { id: 'forma', nome: 'Forma de pagamento trocada', dir: '', venda: false, neutro: true },
+  { id: 'outro', nome: 'Outro', dir: '', venda: false }];
+const CAT_AJ = Object.fromEntries(CATS_AJ.map(c => [c.id, c]));
+function fin(l) {
+  const f = l.fin ||= { real: {}, outros: [], ajustes: [], concluido: false };
+  const r = resumo(l); const inf = l.conferenciaInfinite;
+  const real = {}; ['pix', 'credito', 'debito'].forEach(k => real[k] = f.real[k] ?? (inf ? (inf.formas[k] || 0) : null)); real.dinheiro = f.real.dinheiro ?? null;
+  const outros = f.outros.reduce((a, o) => a + (o.valor || 0), 0);
+  const faltaInformar = Object.entries(real).filter(([, v]) => v === null).map(([k]) => FORMA[k]);
+  const realTotal = Object.values(real).reduce((a, v) => a + (v || 0), 0) + outros;
+  const sinal = a => (a.dir === 'menos' ? -1 : 1) * (a.valor || 0);
+  const justificado = f.ajustes.filter(a => !CAT_AJ[a.cat]?.neutro).reduce((s, a) => s + sinal(a), 0);
+  const ajVenda = f.ajustes.filter(a => CAT_AJ[a.cat]?.venda).reduce((s, a) => s + sinal(a), 0);
+  const dif = +(realTotal - r.liq).toFixed(2); const pendente = +(dif - justificado).toFixed(2);
+  return { f, r, real, outros, realTotal, dif, justificado, pendente, ajVenda, vendaAjustada: r.liq + ajVenda, sinal, faltaInformar, pronto: !faltaInformar.length && Math.abs(pendente) < 0.01 };
+}
+// itens do pedido de venda e da perda depois da conferência: venda não registrada com SKU passa da perda para a venda;
+// o restante do ajuste que mexe na venda é rateado pelos itens vendidos, proporcional ao valor
+function baixasAjustadas(l) {
+  const sd = saldos(l); const ret = l.retorno || {}; const F = fin(l);
+  const itens = {}; Object.entries(sd).forEach(([s, x]) => { const dif = ret[s] === undefined ? 0 : ret[s] - x.saldo; itens[s] = { q: x.vendido, valor: x.valor, perda: dif < 0 ? -dif : 0, bonif: x.mov }; });
+  let resto = F.ajVenda;
+  F.f.ajustes.filter(a => a.cat === 'venda_nr' && a.sku && a.qtd).forEach(a => { const it = itens[a.sku] ||= { q: 0, valor: 0, perda: 0, bonif: 0 };
+    const v = F.sinal(a); it.q += a.qtd; it.valor += v; it.perda = Math.max(0, it.perda - a.qtd); resto -= v; });
+  const base = Object.values(itens).reduce((s, it) => s + (it.q ? it.valor : 0), 0);
+  if (base && Math.abs(resto) > 0.001) Object.values(itens).forEach(it => { if (it.q) it.valor += resto * it.valor / base; });
+  return itens;
+}
+function tFinanceiro(l) {
+  const F = fin(l); const inf = l.conferenciaInfinite; const fe = F.f.concluido; const dis = fe ? 'disabled' : '';
+  const linhaReal = (k, nome, dica) => `<div class="line"><div class="grow"><b>${nome}</b><div class="muted small">PDV ${brl(F.r.formas[k] || 0)} · ${dica}</div></div>
+    <input class="i" style="width:130px;text-align:right" inputmode="decimal" data-in="finReal" data-f="${k}" ${dis} value="${F.real[k] === null ? '' : String(+F.real[k].toFixed(2)).replace('.', ',')}" placeholder="R$"></div>`;
+  return `<div class="card"><h2>1. Quanto entrou de verdade</h2>
+    <p class="muted small">O valor do pedido de venda no Tiny sai desta conferência, não do que foi lançado no show.</p>
+    ${linhaReal('pix', 'Pix (InfinitePay)', inf ? 'do extrato' : 'importe o extrato no Relatório')}
+    ${linhaReal('credito', 'Crédito', inf ? 'do extrato' : 'importe o extrato no Relatório')}
+    ${linhaReal('debito', 'Débito', inf ? 'do extrato' : 'importe o extrato no Relatório')}
+    ${linhaReal('dinheiro', 'Dinheiro', 'contado no caixa')}
+    ${F.f.outros.map((o, i) => `<div class="line"><input class="i grow" style="min-width:0" data-in="outroNome" data-i="${i}" ${dis} value="${esc(o.nome)}" placeholder="Meio (ex.: Pix Sicoob)"><input class="i" style="width:110px;text-align:right" inputmode="decimal" data-in="outroValor" data-i="${i}" ${dis} value="${o.valor ? String(o.valor).replace('.', ',') : ''}" placeholder="R$">${fe ? '' : `<button class="iconbtn" data-a="rmOutro" data-i="${i}">✕</button>`}</div>`).join('')}
+    ${fe ? '' : `<button class="btn block" style="min-height:48px;margin-top:8px" data-a="addOutro">+ Outro meio (Pix Sicoob, Mercado Pago…)</button>`}
+    ${F.r.formas.outro ? `<p class="small muted">No PDV: ${brl(F.r.formas.outro)} lançados como "outro meio".</p>` : ''}</div>
+  <div class="card"><h2>2. Diferença</h2><div class="kpis">
+    <div class="kpi"><b>${brl(F.r.liq)}</b><span>lançado no PDV</span></div><div class="kpi"><b>${brl(F.realTotal)}</b><span>recebido de verdade</span></div>
+    <div class="kpi"><b class="${Math.abs(F.dif) < .01 ? 'zerot' : 'neg'}">${brl(F.dif)}</b><span>diferença</span></div><div class="kpi"><b class="${Math.abs(F.pendente) < .01 ? 'zerot' : 'neg'}">${brl(F.pendente)}</b><span>sem justificativa</span></div></div>
+    ${F.faltaInformar.length ? `<div class="warn" style="margin-top:12px">Falta informar: ${F.faltaInformar.join(', ')}.</div>` : ''}</div>
+  <div class="card"><h2>3. Justificativas</h2>
+    <p class="muted small">Toda diferença precisa de explicação. Desconto não lançado, venda não registrada, preço errado e estorno mudam o valor da venda. Quebra de caixa e "outro" ficam como ajuste à parte. Forma trocada só explica diferença entre formas.</p>
+    ${F.f.ajustes.map((a, i) => `<div class="line"><div class="grow"><b>${esc(CAT_AJ[a.cat]?.nome || a.cat)}</b><div class="muted small">${a.sku ? esc(a.sku) + ' · ' + a.qtd + ' pç · ' : ''}${esc(a.obs || '')}${CAT_AJ[a.cat]?.venda ? ' · muda a venda' : ''}</div></div><b class="${a.dir === 'menos' ? 'neg' : 'pos'}">${CAT_AJ[a.cat]?.neutro ? '' : a.dir === 'menos' ? '−' : '+'}${brl(a.valor)}</b>${fe ? '' : `<button class="iconbtn" data-a="rmAjuste" data-i="${i}">✕</button>`}</div>`).join('') || '<div class="muted small">Nenhuma ainda.</div>'}
+    ${fe ? '' : `<button class="btn block" style="min-height:48px;margin-top:8px" data-a="novoAjuste">+ Justificar diferença</button>`}</div>
+  <div class="card"><h2>4. Resultado</h2>
+    <div class="line"><span class="grow">Venda no pedido do Tiny</span><b>${brl(F.vendaAjustada)}</b></div>
+    <div class="line"><span class="grow">Ajustes fora da venda (quebra de caixa, outros)</span><b>${brl(F.justificado - F.ajVenda)}</b></div>
+    ${fe ? `<p class="small">Conferência concluída em ${fmtDT(F.f.concluidoEm)} por ${esc(F.f.concluidoPor)}.</p><button class="btn block" data-a="reabrirFin">Reabrir conferência</button>`
+      : `<button class="btn ok block" ${F.pronto ? '' : 'disabled'} data-a="concluirFin">Concluir conferência financeira</button>${F.pronto ? '' : '<p class="muted small">Libera quando todas as formas estiverem informadas e a diferença sem justificativa for zero.</p>'}`}</div>`;
+}
 function tRelatorio(l) {
   const r = resumo(l); const sh = l.shows || [];
   const inf = S.infinite && S.infinite.loteId === l.id ? S.infinite : null;
@@ -623,7 +703,7 @@ function tRelatorio(l) {
     <div class="kpi"><b>${brl(r.liq)}</b><span>vendas líquidas</span></div><div class="kpi"><b>${r.n}</b><span>vendas (${r.canc} canceladas)</span></div>
     <div class="kpi"><b>${r.pecas}</b><span>peças vendidas</span></div><div class="kpi"><b>${brl(r.ticket)}</b><span>ticket médio</span></div></div>
     ${r.desc ? `<p class="small muted">Descontos: ${brl(r.desc)} sobre ${brl(r.bruto)} brutos.</p>` : ''}</div>
-  <div class="card"><h2>Por forma de pagamento</h2>${FORMAS.map(f => `<div class="line"><span class="grow">${f.nome}</span><b>${brl(r.formas[f.id] || 0)}</b>${inf && f.id !== 'dinheiro' ? `<span class="small ${Math.abs((inf.formas[f.id] || 0) - (r.formas[f.id] || 0)) > 0.5 ? 'neg' : 'zerot'}" style="min-width:110px;text-align:right">InfinitePay ${brl(inf.formas[f.id] || 0)}</span>` : ''}</div>`).join('')}
+  <div class="card"><h2>Por forma de pagamento</h2>${FORMAS.map(f => `<div class="line"><span class="grow">${f.nome}</span><b>${brl(r.formas[f.id] || 0)}</b>${inf && !FORA_INFINITE.includes(f.id) ? `<span class="small ${Math.abs((inf.formas[f.id] || 0) - (r.formas[f.id] || 0)) > 0.5 ? 'neg' : 'zerot'}" style="min-width:110px;text-align:right">InfinitePay ${brl(inf.formas[f.id] || 0)}</span>` : ''}</div>`).join('')}
     <label class="btn block" style="margin-top:10px">${inf ? 'Trocar' : 'Conferir com'} extrato da InfinitePay<input type="file" accept=".xls,.xlsx,.csv" class="hide" data-in="infinite"></label>
     ${inf ? `<p class="small muted">${inf.n} transações aprovadas entre ${fmtDT(inf.de)} e ${fmtDT(inf.ate)}.</p>` : `<p class="small muted">Exporte as transações do período no app da InfinitePay e importe aqui. Taxas estimadas pelo PDV: <b>${brl(taxasPdv(l))}</b> (líquido estimado ${brl(r.liq - taxasPdv(l))}).</p>`}</div>
   ${cardInfinite(l)}
@@ -644,7 +724,7 @@ function renderSheet() {
   if (!el) { el = document.createElement('div'); el.id = 'sheet'; el.className = 'scrim'; document.body.appendChild(el); }
   const k = S.sheet.k; let h = '';
   if (k === 'modelo') h = shModelo(); if (k === 'cart') h = shCart(); if (k === 'pagar') h = shPagar(); if (k === 'show') h = shShow();
-  if (k === 'mov') h = shMov(); if (k === 'texto') h = shTexto(); if (k === 'cargaPrev') h = shCargaPrev();
+  if (k === 'mov') h = shMov(); if (k === 'texto') h = shTexto(); if (k === 'cargaPrev') h = shCargaPrev(); if (k === 'ajuste') h = shAjuste();
   el.innerHTML = `<div class="sheet" role="dialog"><div class="grab"></div>${h}</div>`;
 }
 function shModelo() {
@@ -680,7 +760,7 @@ function shPagar() {
     <p class="muted">Parcelas (até 6x sem juros)</p><div class="sizes">${[1, 2, 3, 4, 5, 6].map(n => `<button class="size" data-a="parcelas" data-n="${n}">${n}x<small>${brl((st.valor ?? falta) / n)}</small></button>`).join('')}</div>`;
   return `<div class="row"><h3 class="grow">Pagamento</h3><button class="iconbtn" data-a="fechar">✕</button></div>
   <div class="total"><span class="muted">${pago ? 'Falta' : 'Total'}</span><b class="big">${brl(falta)}</b></div>
-  ${S.pagamentos.length ? `<div class="card">${S.pagamentos.map((p, i) => `<div class="line"><span class="grow">${FORMA[p.forma]}${p.parcelas > 1 ? ' ' + p.parcelas + 'x' : ''}${p.troco ? ` <span class="muted small">(recebeu ${brl(p.valor + p.troco)}, troco ${brl(p.troco)})</span>` : ''}</span><b>${brl(p.valor)}</b><button class="iconbtn" data-a="rmPag" data-i="${i}">✕</button></div>`).join('')}</div>` : ''}
+  ${S.pagamentos.length ? `<div class="card">${S.pagamentos.map((p, i) => `<div class="line"><span class="grow">${p.nome ? esc(p.nome) : FORMA[p.forma]}${p.parcelas > 1 ? ' ' + p.parcelas + 'x' : ''}${p.troco ? ` <span class="muted small">(recebeu ${brl(p.valor + p.troco)}, troco ${brl(p.troco)})</span>` : ''}</span><b>${brl(p.valor)}</b><button class="iconbtn" data-a="rmPag" data-i="${i}">✕</button></div>`).join('')}</div>` : ''}
   ${falta > 0 ? `<div class="pays">${FORMAS.map(f => `<button class="pay ${f.cls}" data-a="forma" data-f="${f.id}">${f.nome}<small>${brl(st.parcial ?? falta)}</small></button>`).join('')}</div>
     <button class="btn block" style="min-height:48px" data-a="dividir">${st.parcial != null ? 'Valor parcial: ' + brl(st.parcial) + ' (trocar)' : 'Dividir em duas formas'}</button>`
     : `<button class="btn ok block" style="min-height:72px;font-size:21px" data-a="finalizar">Confirmar venda${troco ? ' · troco ' + brl(troco) : ''}</button>`}
@@ -693,7 +773,7 @@ function shShow() {
   ${(l.shows || []).map(s => `<button class="card" style="width:100%;text-align:left;${at && at.id === s.id ? 'border:2px solid var(--orange)' : ''}" data-a="usarShow" data-id="${s.id}"><div class="row"><b class="grow">${at && at.id === s.id ? '📍 ' : ''}${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</b>${at && at.id === s.id ? '<span class="pill aberto">ATUAL</span>' : ''}</div><div class="muted small">${esc(s.evento || '')}</div></button>`).join('')}
   ${l.status === 'aberto' ? `<form data-f="novoShow" class="card"><h2>Adicionar show</h2>
     <label class="f">Cidade<input class="i" name="cidade" required></label>
-    <div class="grid2"><label class="f">UF<select class="i" name="uf" required><option value="">--</option>${UFS.map(u => `<option ${at && at.uf === u ? 'selected' : ''}>${u}</option>`).join('')}</select></label><label class="f">Data<input class="i" type="date" name="data" value="${today()}" required></label></div>
+    <div class="grid2"><label class="f">UF<select class="i" name="uf" required><option value="">--</option>${UFS.map(u => `<option ${at && at.uf === u ? 'selected' : ''}>${u}</option>`).join('')}</select></label><label class="f">Data<input class="i" type="date" name="data" value="${dataNoite()}" required></label></div>
     <label class="f">Evento / local<input class="i" name="evento"></label><button class="btn primary block">Adicionar e usar</button></form>` : ''}`;
 }
 function shMov() {
@@ -718,6 +798,21 @@ function shCargaPrev() {
   <div class="card" style="margin-top:12px">${itens.map(([s, q]) => `<div class="line"><div class="grow"><div style="font-weight:600">${esc(S.produtos.get(s)?.descricao || s)}</div><div class="muted small">${esc(s)}</div></div><b>${q}</b></div>`).join('')}</div>
   <p class="muted small">Compare com o total de peças do pedido no PDF antes de confirmar.</p>
   <div class="grid2"><button class="btn" data-a="fechar">Cancelar</button><button class="btn primary" data-a="usarCarga">Usar esta carga</button></div>`;
+}
+function shAjuste() {
+  const l = lote(); const F = fin(l); const st = S.sheet; const cat = CAT_AJ[st.cat || 'desconto'];
+  const sd = saldos(l); const ret = l.retorno || {};
+  const faltas = Object.entries(sd).map(([s, x]) => [s, ret[s] === undefined ? 0 : x.saldo - ret[s]]).filter(([, q]) => q > 0);
+  return `<div class="row"><h3 class="grow">Justificar diferença</h3><button class="iconbtn" data-a="fechar">✕</button></div>
+  <p class="muted small">Diferença sem justificativa: <b>${brl(F.pendente)}</b> (${F.pendente >= 0 ? 'entrou a mais' : 'entrou a menos'} que o lançado).</p>
+  <form data-f="ajuste">
+  <label class="f">Motivo<select class="i" name="cat" data-in="ajCat">${CATS_AJ.map(c => `<option value="${c.id}" ${c.id === cat.id ? 'selected' : ''}>${c.nome}</option>`).join('')}</select></label>
+  ${cat.neutro ? '<p class="muted small">Só explica diferença entre formas (ex.: lançou Pix e foi débito). Não entra na soma.</p>' : `<label class="f">Efeito<select class="i" name="dir"><option value="mais" ${(cat.dir || (F.pendente >= 0 ? 'mais' : 'menos')) === 'mais' ? 'selected' : ''}>Entrou a mais que o lançado</option><option value="menos" ${(cat.dir || (F.pendente >= 0 ? 'mais' : 'menos')) === 'menos' ? 'selected' : ''}>Entrou a menos que o lançado</option></select></label>`}
+  <label class="f">Valor (R$)<input class="i" name="valor" inputmode="decimal" required value="${Math.abs(F.pendente) >= .01 && !cat.neutro ? String(Math.abs(F.pendente).toFixed(2)).replace('.', ',') : ''}"></label>
+  ${cat.sku ? `<div class="grid2"><label class="f">Peça que faltou (opcional)<select class="i" name="sku"><option value="">—</option>${faltas.map(([s, q]) => `<option value="${esc(s)}">${esc(s)} (faltam ${q})</option>`).join('')}</select></label><label class="f">Quantidade<input class="i" name="qtd" inputmode="numeric" value="1"></label></div>
+    <p class="muted small">Com a peça informada, ela sai da perda e entra no pedido de venda.</p>` : ''}
+  <label class="f">Observação<input class="i" name="obs" placeholder="ex.: 2 bonés por R$ 200 no fim do show" ${cat.id === 'outro' ? 'required' : ''}></label>
+  <button class="btn ok block">Lançar justificativa</button></form>`;
 }
 function shTexto() {
   const st = S.sheet;
@@ -779,6 +874,8 @@ const A = {
     const valor = S.sheet.parcial != null ? Math.min(S.sheet.parcial, falta) : falta;
     if (f === 'dinheiro') { S.sheet = { k: 'pagar', forma: 'dinheiro', valor }; renderSheet(); bindRecebido(valor); return; }
     if (f === 'credito') { S.sheet = { k: 'pagar', forma: 'credito', valor }; renderSheet(); return; }
+    if (f === 'outro') { perguntar({ titulo: 'Qual meio de pagamento?', texto: `${brl(valor)} fora da InfinitePay`, ph: 'ex.: Pix Sicoob', obrig: true, ok: 'Confirmar', chips: ['Pix Sicoob', 'Mercado Pago', 'Transferência', 'PicPay'] })
+      .then(nome => { if (nome) S.pagamentos.push({ forma: 'outro', valor, nome }); S.sheet = { k: 'pagar' }; renderSheet(); }); return; }
     S.pagamentos.push({ forma: f, valor }); S.sheet = { k: 'pagar' }; vibrate(15); renderSheet();
   },
   parcelas: e => { S.pagamentos.push({ forma: 'credito', valor: S.sheet.valor, parcelas: +e.dataset.n }); S.sheet = { k: 'pagar' }; vibrate(15); renderSheet(); },
@@ -790,7 +887,7 @@ const A = {
   finalizar: async () => {
     const l = lote(); const sh = showAtual(l); S.cfg.seqVenda = (S.cfg.seqVenda || 0) + 1; l.seq = S.cfg.seqVenda; saveCfg();
     const v = { id: uid(), num: l.seq, loteId: l.id, showId: sh?.id, ts: now(), itens: S.cart.map(c => ({ sku: c.sku, qtd: c.qtd, preco: c.preco, ...(c.semSaldo ? { semSaldo: c.semSaldo } : {}) })),
-      desconto: S.cartDesc, descMotivo: S.cartDesc ? S.cartDescMotivo : '', pagamentos: S.pagamentos.map(p => ({ forma: p.forma, valor: p.valor, ...(p.parcelas ? { parcelas: p.parcelas } : {}) })),
+      desconto: S.cartDesc, descMotivo: S.cartDesc ? S.cartDescMotivo : '', pagamentos: S.pagamentos.map(p => ({ forma: p.forma, valor: p.valor, ...(p.parcelas ? { parcelas: p.parcelas } : {}), ...(p.nome ? { nome: p.nome } : {}) })),
       troco: S.pagamentos.reduce((a, p) => a + (p.troco || 0), 0), vendedor: S.cfg.vendedor, caixa: S.cfg.caixa, aparelho: S.cfg.aparelho, status: 'ok' };
     S.vendas.push(v); await DB.put('vendas', v);
     const bk = { cart: S.cart, d: S.cartDesc };
@@ -810,6 +907,18 @@ const A = {
   ret: async e => { const l = lote(); if (l.status === 'aberto') { toast('Primeiro toque em "Travar vendas"', null, true); return; } l.retorno ||= {}; const s = e.dataset.s; l.retorno[s] = Math.max(0, (l.retorno[s] || 0) + +e.dataset.d); await saveLote(l); const inp = document.querySelector(`input[data-in=ret][data-s="${CSS.escape(s)}"]`); if (inp) inp.value = l.retorno[s]; vibrate(10); },
   revelar: () => { const l = lote(); if (l.status === 'aberto') { toast('Primeiro toque em "Travar vendas"', null, true); return; } S.contagemRevelada = true; render(); window.scrollTo(0, 0); },
   recontar: () => { S.contagemRevelada = false; render(); },
+  corrigirData: async e => { const l = lote(); const sh = showAtual(l); (l.historico ||= []).push({ ts: now(), acao: 'data do show corrigida', motivo: `${sh.cidade}: ${fmtD(sh.data)} → ${fmtD(e.dataset.d)}`, quem: S.cfg.vendedor });
+    sh.data = e.dataset.d; await saveLote(l); render(); toast('Data do show corrigida'); },
+  dataCerta: async e => { const l = lote(); showAtual(l).dataConferida = e.dataset.d; await saveLote(l); render(); },
+  addOutro: async () => { const l = lote(); fin(l).f.outros.push({ nome: '', valor: 0 }); await saveLote(l); render(); },
+  rmOutro: async e => { const l = lote(); fin(l).f.outros.splice(+e.dataset.i, 1); await saveLote(l); render(); },
+  novoAjuste: () => { S.sheet = { k: 'ajuste', cat: fin(lote()).pendente < 0 ? 'desconto' : 'venda_nr' }; renderSheet(); },
+  rmAjuste: async e => { const l = lote(); fin(l).f.ajustes.splice(+e.dataset.i, 1); await saveLote(l); render(); },
+  concluirFin: async () => { const l = lote(); const F = fin(l); if (!F.pronto) return;
+    const quem = await perguntar({ titulo: 'Concluir a conferência financeira?', texto: `Venda no pedido do Tiny: ${brl(F.vendaAjustada)}. Recebido: ${brl(F.realTotal)}.`, ph: 'nome de quem conferiu', obrig: true, ok: 'Concluir' });
+    S.sheet = null; if (!quem) return render(); F.f.concluido = true; F.f.concluidoEm = now(); F.f.concluidoPor = quem; await saveLote(l); render(); toast('Conferência financeira concluída'); },
+  reabrirFin: async () => { const l = lote(); const m = await perguntar({ titulo: 'Reabrir a conferência?', ph: 'motivo', obrig: true, ok: 'Reabrir', perigo: true }); S.sheet = null; if (!m) return render();
+    (l.historico ||= []).push({ ts: now(), acao: 'conferência financeira reaberta', motivo: m, quem: S.cfg.vendedor }); fin(l).f.concluido = false; await saveLote(l); render(); },
   destravar: async () => { const l = lote(); if (l.status !== 'contagem') return;
     const n = Object.keys(l.retorno || {}).length;
     const m = await perguntar({ titulo: 'Destravar as vendas?', texto: `O lote volta a aceitar vendas e a contagem é zerada${n ? ` (${n} SKUs já contados serão apagados)` : ''}. Use se travou por engano ou se ainda vai vender.`, ph: 'motivo (obrigatório)', obrig: true, ok: 'Destravar e zerar', perigo: true, chips: ['Travou por engano', 'Ainda vai vender', 'Recomeçar a contagem'] });
@@ -875,6 +984,10 @@ document.addEventListener('submit', async ev => {
   }
   if (k === 'novoShow') { const l = lote(); const sh = { id: uid(), cidade: fd.get('cidade').trim(), uf: fd.get('uf'), data: fd.get('data'), evento: fd.get('evento').trim() }; l.shows.push(sh); l.showAtual = sh.id; await saveLote(l); S.sheet = null; render(); toast(`Agora vendendo em ${sh.cidade}/${sh.uf}`); }
   if (k === 'mov') salvarMov(fd);
+  if (k === 'ajuste') { const l = lote(); const cat = CAT_AJ[fd.get('cat')]; const a = { id: uid(), cat: cat.id, dir: cat.neutro ? 'mais' : fd.get('dir'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: S.cfg.vendedor, ts: now() };
+    if (cat.sku && fd.get('sku')) { a.sku = fd.get('sku'); a.qtd = Math.max(1, Math.round(num(fd.get('qtd')))); }
+    if (!a.valor) { toast('Informe o valor', null, true); return; }
+    fin(l).f.ajustes.push(a); await saveLote(l); S.sheet = null; render(); toast('Justificativa lançada'); }
 });
 document.addEventListener('click', ev => {
   const el = ev.target.closest('[data-a]'); if (el) { ev.preventDefault(); const fn = A[el.dataset.a]; fn && fn(el, ev); return; }
@@ -887,7 +1000,14 @@ document.addEventListener('input', async ev => {
   if (t.dataset.in === 'ret') { const l = lote(); if (l.status === 'aberto') { t.value = ''; toast('Primeiro toque em "Travar vendas"', null, true); return; } l.retorno ||= {}; if (t.value === '') delete l.retorno[t.dataset.s]; else l.retorno[t.dataset.s] = Math.max(0, Math.round(num(t.value))); await saveLote(l); }
 });
 document.addEventListener('change', async ev => {
-  const t = ev.target; const f = t.files && t.files[0]; if (!f) return;
+  const t = ev.target;
+  if (t.dataset.in === 'ajCat') { S.sheet = { k: 'ajuste', cat: t.value }; renderSheet(); return; }
+  if (['finReal', 'outroNome', 'outroValor'].includes(t.dataset.in)) { const l = lote(); const F = fin(l);
+    if (t.dataset.in === 'finReal') { if (t.value.trim() === '') delete F.f.real[t.dataset.f]; else F.f.real[t.dataset.f] = num(t.value); }
+    if (t.dataset.in === 'outroNome') F.f.outros[+t.dataset.i].nome = t.value.trim();
+    if (t.dataset.in === 'outroValor') F.f.outros[+t.dataset.i].valor = num(t.value);
+    await saveLote(l); render(); return; }
+  const f = t.files && t.files[0]; if (!f) return;
   try {
     if (t.dataset.in === 'catalogo') { const r = await importarCatalogo(f); toast(`${r.n} SKUs importados (${r.novos} novos)`); render(); }
     if (t.dataset.in === 'carga' && /\.pdf$/i.test(f.name)) { await lerCargaPdf(f, lote()); t.value = ''; return; }
@@ -952,7 +1072,7 @@ function analiseInfinite(l) {
     const s = (l.shows || []).filter(s => s.data && s.data <= dia && (+new Date(dia) - +new Date(s.data)) <= 864e5).sort((a, b) => b.data.localeCompare(a.data))[0];
     return s ? `${s.cidade}/${s.uf}` : `fora dos shows (${fmtD(dia)})`; };
   // conciliação: cada pagamento do PDV (exceto dinheiro) com a transação de mesma forma e valor mais próxima no tempo (até 30 min)
-  const pags = []; vendasLote(l).forEach(v => v.pagamentos.filter(p => p.forma !== 'dinheiro').forEach(p => pags.push({ num: v.num, t: +new Date(v.ts), forma: p.forma, valor: p.valor, parcelas: p.parcelas || 1 })));
+  const pags = []; vendasLote(l).forEach(v => v.pagamentos.filter(p => !FORA_INFINITE.includes(p.forma)).forEach(p => pags.push({ num: v.num, t: +new Date(v.ts), forma: p.forma, valor: p.valor, parcelas: p.parcelas || 1 })));
   const livre = ap.map(x => ({ ...x, tt: +new Date(x.t), usado: false })); const semTx = [];
   pags.sort((a, b) => a.t - b.t).forEach(p => {
     let best = null; livre.forEach(x => { if (x.usado || x.forma !== p.forma || Math.abs(x.valor - p.valor) > 0.01) return; const d = Math.abs(x.tt - p.t); if (d <= 30 * 60e3 && (!best || d < Math.abs(best.tt - p.t))) best = x; });
@@ -983,17 +1103,18 @@ function csvTiny(l) {
 // Três arquivos no layout "importar pedidos" do Tiny: venda (só o vendido, preço médio real), bonificação e perda (a custo).
 const CAB_TINY = ['ID', 'Número do pedido', 'Data', 'Data prevista', 'ID contato', 'Nome do contato*', 'Tipo de Pessoa', 'CPF/CNPJ', 'RG/IE', 'CEP', 'Município', 'UF', 'Endereço', 'Endereço Nro', 'Complemento', 'Bairro', 'Fone', 'Celular', 'e-mail', 'Desconto pedido (% ou valor)', 'Frete', 'Observações', 'Situação', 'ID produto', 'Descrição', 'Quantidade', 'Valor unitário', 'Desconto item %', 'Código de rastreamento', 'Número da ordem de compra', 'Vendedor', 'Despesas', 'Desconto do pedido rateado', 'Frete pedido rateado', 'Despesas pedido rateado', 'Destinatário', 'CPF/CNPJ entrega', 'CEP entrega', 'Município entrega', 'UF entrega', 'Endereço entrega', 'Endereço Nro entrega', 'Complemento entrega', 'Bairro entrega', 'Fone entrega', 'Código (SKU)'];
 function csvTinyPedido(l, tipo) {
-  const sd = saldos(l); const ret = l.retorno || {}; const c = l.contatoTiny || { nome: 'Shows e Eventos' };
+  if (tipo !== 'bonif' && !fin(l).f.concluido) { toast('Conclua a conferência financeira antes de gerar a venda e a perda', null, true); S.tab = 'financeiro'; render(); return; }
+  const sd = saldos(l); const ret = l.retorno || {}; const c = l.contatoTiny || { nome: 'Shows e Eventos' }; const aj = baixasAjustadas(l);
   const br = v => (Math.round(v * 100) / 100).toFixed(2).replace('.', ',');
   const shows = (l.shows || []).map(s => `${s.cidade}/${s.uf} ${fmtD(s.data)}`).join('; ');
   const obs = { venda: `PDV Shows - venda do pedido ${l.pedido || ''} - ${shows}`, bonif: `PDV Shows - BONIFICACAO CFOP ${S.cfg.cfopBonif} - pedido ${l.pedido || ''} - ${shows}`, perda: `PDV Shows - PERDA NA CONTAGEM CFOP ${S.cfg.cfopPerda} - pedido ${l.pedido || ''} - ${shows}` }[tipo];
   const linhas = [];
-  Object.entries(sd).filter(([, x]) => x.carga || x.vendido || x.mov).sort().forEach(([s, x]) => {
-    const p = S.produtos.get(s) || {}; const dif = ret[s] === undefined ? 0 : ret[s] - x.saldo;
+  Object.entries(aj).sort().forEach(([s, it]) => {
+    const p = S.produtos.get(s) || {};
     let q = 0, v = 0;
-    if (tipo === 'venda') { q = x.vendido; v = x.vendido ? x.valor / x.vendido : 0; }
-    if (tipo === 'bonif') { q = x.mov; v = p.custo || 0; }
-    if (tipo === 'perda') { q = dif < 0 ? -dif : 0; v = p.custo || 0; }
+    if (tipo === 'venda') { q = it.q; v = it.q ? it.valor / it.q : 0; } // preço médio real, depois da conferência financeira
+    if (tipo === 'bonif') { q = it.bonif; v = p.custo || 0; }
+    if (tipo === 'perda') { q = it.perda; v = p.custo || 0; }
     if (!q) return;
     const L = Object.fromEntries(CAB_TINY.map(k => [k, '']));
     Object.assign(L, { 'ID': '0', 'Data': new Date().toLocaleDateString('pt-BR'), 'ID contato': '0', 'Nome do contato*': c.nome, 'Tipo de Pessoa': c.tipo, 'CPF/CNPJ': c.doc, 'RG/IE': c.ie, 'CEP': c.cep, 'Município': c.mun, 'UF': c.uf,
@@ -1052,21 +1173,31 @@ function relatorioHTML(l) {
   <tr><td class="l">Responsável / equipe</td><td class="l">${esc(l.resp)}${l.equipe ? ' · ' + esc(l.equipe) : ''}</td></tr>
   <tr><td class="l">Carga</td><td class="l">${Object.values(l.carga || {}).reduce((a, b) => a + b, 0)} peças · ${esc(l.cargaArquivo || (l.cargaManual ? 'contada no app' : '—'))}</td></tr>
   ${fech ? `<tr><td class="l">Fechamento</td><td class="l">${fmtDT(l.fechadoEm)} · conferido por ${esc(l.fechadoPor)}</td></tr>` : ''}
-  ${(l.historico || []).map(h => `<tr><td class="l">Contagem destravada</td><td class="l">${fmtDT(h.ts)} · ${esc(h.quem)} · ${esc(h.motivo)}${h.contadosApagados ? ` · ${h.contadosApagados} SKUs de contagem apagados` : ''}</td></tr>`).join('')}</table>
+  ${(l.historico || []).map(h => `<tr><td class="l">${h.acao === 'destravou vendas' || !h.acao ? 'Contagem destravada' : esc(titulo(h.acao))}</td><td class="l">${fmtDT(h.ts)} · ${esc(h.quem)} · ${esc(h.motivo)}${h.contadosApagados ? ` · ${h.contadosApagados} SKUs de contagem apagados` : ''}</td></tr>`).join('')}</table>
   <h2>Resumo</h2><div class="k"><div><b>${brl(r.liq)}</b>vendas líquidas</div><div><b>${r.n}</b>vendas (${r.canc} canceladas)</div><div><b>${r.pecas}</b>peças vendidas</div><div><b>${brl(r.ticket)}</b>ticket médio</div></div>
   <p>Bruto ${brl(r.bruto)} · descontos ${brl(r.desc)} · bonificações ${soma(bonif, x => x.mov)} peças · perdas na contagem ${soma(perdas, x => x.perda)} peças · sobras ${soma(sobras, x => x.sobra)} peças</p>
 
   <h2>Baixas no Tiny (documentos separados)</h2>
   <table><thead><tr><th class="l">Documento</th><th class="l">CFOP</th><th>Peças</th><th>Valor</th><th class="l">Base do valor</th></tr></thead><tbody>
-  <tr><td class="l">Pedido de venda (só o vendido)</td><td class="l">do pedido</td><td>${soma(vendidos, x => x.vendido)}</td><td>${brl(soma(vendidos, x => x.valor))}</td><td class="l">recebido, desconto rateado</td></tr>
+  ${(() => { const F = fin(l); const aj = Object.values(baixasAjustadas(l)); return F.f.concluido
+    ? `<tr><td class="l">Pedido de venda (só o vendido)</td><td class="l">do pedido</td><td>${aj.reduce((a, it) => a + it.q, 0)}</td><td>${brl(aj.reduce((a, it) => a + (it.q ? it.valor : 0), 0))}</td><td class="l">conferência financeira</td></tr>`
+    : `<tr><td class="l">Pedido de venda (só o vendido)</td><td class="l">do pedido</td><td>${soma(vendidos, x => x.vendido)}</td><td>${brl(soma(vendidos, x => x.valor))}</td><td class="l neg">PDV, sem conferência financeira</td></tr>`; })()}
   <tr><td class="l">Nota de bonificação</td><td class="l">${esc(S.cfg.cfopBonif)}</td><td>${soma(bonif, x => x.mov)}</td><td>${brl(soma(bonif, x => x.mov * custo(x)))}</td><td class="l">custo do cadastro</td></tr>
-  <tr><td class="l">Nota de perda (contagem)</td><td class="l">${esc(S.cfg.cfopPerda)}</td><td>${soma(perdas, x => x.perda)}</td><td>${brl(soma(perdas, x => x.perda * custo(x)))}</td><td class="l">custo do cadastro</td></tr>
+  <tr><td class="l">Nota de perda (contagem)</td><td class="l">${esc(S.cfg.cfopPerda)}</td><td>${Object.values(baixasAjustadas(l)).reduce((a, it) => a + it.perda, 0)}</td><td>${brl(soma(perdas, x => x.perda * custo(x)))}</td><td class="l">custo do cadastro</td></tr>
   <tr><td class="l">Retorno ao estoque</td><td class="l">—</td><td>${soma(dev, x => x.ret)}</td><td>—</td><td class="l">contagem física</td></tr>
   </tbody></table>
   <p class="foot">Bonificação e perda saem fora do pedido de venda, para não diluir o preço médio. Sobra (contado acima do esperado) não gera nota: confira a carga e as vendas do SKU.</p>
 
+  ${(() => { const F = fin(l); const nomes = { pix: 'Pix (InfinitePay)', credito: 'Crédito', debito: 'Débito', dinheiro: 'Dinheiro' };
+    return `<h2>Conferência financeira ${F.f.concluido ? `(concluída em ${fmtDT(F.f.concluidoEm)} por ${esc(F.f.concluidoPor)})` : '<span class="neg">(não concluída)</span>'}</h2>
+    <table><thead><tr><th class="l">Meio</th><th>PDV</th><th>Recebido</th><th>Diferença</th></tr></thead><tbody>
+    ${Object.entries(nomes).map(([k, n]) => `<tr><td class="l">${n}</td><td>${brl(F.r.formas[k] || 0)}</td><td>${F.real[k] === null ? '—' : brl(F.real[k])}</td><td>${F.real[k] === null ? '—' : brl(F.real[k] - (F.r.formas[k] || 0))}</td></tr>`).join('')}
+    ${F.f.outros.map(o => `<tr><td class="l">${esc(o.nome || 'Outro meio')}</td><td>—</td><td>${brl(o.valor || 0)}</td><td></td></tr>`).join('')}${F.r.formas.outro ? `<tr><td class="l">Outro meio (lançado no PDV)</td><td>${brl(F.r.formas.outro)}</td><td>—</td><td></td></tr>` : ''}
+    <tr><th class="l">Total</th><th>${brl(F.r.liq)}</th><th>${brl(F.realTotal)}</th><th>${brl(F.dif)}</th></tr></tbody></table>
+    ${F.f.ajustes.length ? `<table><thead><tr><th class="l">Justificativa</th><th class="l">Detalhe</th><th>Valor</th><th class="l">Efeito</th></tr></thead><tbody>${F.f.ajustes.map(a => `<tr><td class="l">${esc(CAT_AJ[a.cat]?.nome || a.cat)}</td><td class="l">${a.sku ? esc(a.sku) + ' · ' + a.qtd + ' pç · ' : ''}${esc(a.obs || '')} · ${esc(a.quem || '')}</td><td>${CAT_AJ[a.cat]?.neutro ? '' : a.dir === 'menos' ? '−' : '+'}${brl(a.valor)}</td><td class="l">${CAT_AJ[a.cat]?.neutro ? 'só entre formas' : CAT_AJ[a.cat]?.venda ? 'muda a venda' : 'fora da venda'}</td></tr>`).join('')}</tbody></table>` : ''}
+    <p>Venda no pedido do Tiny: <b>${brl(F.vendaAjustada)}</b> · ajustes fora da venda: ${brl(F.justificado - F.ajVenda)} · sem justificativa: <b class="${Math.abs(F.pendente) < .01 ? '' : 'neg'}">${brl(F.pendente)}</b></p>`; })()}
   <h2>Formas de pagamento</h2><table><thead><tr><th class="l">Forma</th><th>PDV</th>${inf ? '<th>InfinitePay</th><th>Diferença</th>' : ''}</tr></thead><tbody>
-  ${FORMAS.map(f => { const a = r.formas[f.id] || 0; const b = inf ? (inf.formas[f.id] || 0) : 0; return `<tr><td class="l">${f.nome}</td><td>${brl(a)}</td>${inf ? (f.id === 'dinheiro' ? '<td>—</td><td>—</td>' : `<td>${brl(b)}</td><td class="${Math.abs(b - a) > .5 ? 'neg' : ''}">${brl(b - a)}</td>`) : ''}</tr>`; }).join('')}
+  ${FORMAS.map(f => { const a = r.formas[f.id] || 0; const b = inf ? (inf.formas[f.id] || 0) : 0; return `<tr><td class="l">${f.nome}</td><td>${brl(a)}</td>${inf ? (FORA_INFINITE.includes(f.id) ? '<td>—</td><td>—</td>' : `<td>${brl(b)}</td><td class="${Math.abs(b - a) > .5 ? 'neg' : ''}">${brl(b - a)}</td>`) : ''}</tr>`; }).join('')}
   <tr><th class="l">Total</th><th>${brl(r.liq)}</th>${inf ? `<th>${brl(Object.values(inf.formas).reduce((a, b) => a + b, 0))}</th><th></th>` : ''}</tr></tbody></table>
   ${inf ? `<p class="foot">Extrato InfinitePay: ${inf.n} transações aprovadas entre ${fmtDT(inf.de)} e ${fmtDT(inf.ate)}. Dinheiro não passa pela InfinitePay: conferir com o caixa físico.</p>` : `<p class="foot">Sem extrato da InfinitePay. Taxas estimadas pelo PDV: ${brl(taxasPdv(l))} · líquido estimado ${brl(r.liq - taxasPdv(l))}.</p>`}
   ${(() => { const a = analiseInfinite(l); if (!a) return '';
@@ -1077,7 +1208,7 @@ function relatorioHTML(l) {
     ${a.semTx.length ? `<p><b class="neg">Pagamentos do PDV sem transação (${a.semTx.length}):</b> ${a.semTx.map(p => `#${p.num} ${FORMA[p.forma]} ${brl(p.valor)}`).join(' · ')}</p>` : ''}
     ${a.negadas.length ? `<p class="foot">${a.negadas.length} transações negadas ou canceladas não entram nos totais.</p>` : ''}`; })()}
 
-  <h2>Por show</h2><table><thead><tr><th class="l">Show</th><th>Vendas</th><th>Peças</th><th>Pix</th><th>Crédito</th><th>Débito</th><th>Dinheiro</th><th>Líquido</th></tr></thead><tbody>
+  <h2>Por show</h2><table><thead><tr><th class="l">Show</th><th>Vendas</th><th>Peças</th><th>Pix</th><th>Crédito</th><th>Débito</th><th>Dinheiro</th><th>Outro</th><th>Líquido</th></tr></thead><tbody>
   ${(l.shows || []).map(s => { const x = resumo(l, s.id); return `<tr><td class="l">${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</td><td>${x.n}</td><td>${x.pecas}</td>${FORMAS.map(f => `<td>${brl(x.formas[f.id] || 0)}</td>`).join('')}<td><b>${brl(x.liq)}</b></td></tr>`; }).join('')}</tbody></table>
 
   ${perdas.length || sobras.length ? `<h2>Divergências da contagem</h2><table><thead><tr><th class="l">SKU</th><th class="l">Descrição</th><th>Esperado</th><th>Contado</th><th>Diferença</th><th class="l">Observação</th></tr></thead><tbody>
