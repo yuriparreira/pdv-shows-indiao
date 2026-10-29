@@ -189,7 +189,7 @@ async function entrarGestor() {
 }
 const ABAS_VENDEDOR = ['vender', 'movs', 'contagem'];
 const SO_GESTOR = new Set(['importarCaixa', 'destravar', 'fecharLote', 'corrigirData', 'precoItem', 'reabrirFin', 'concluirFin', 'enviarConfig', 'backupTudo', 'sincAgora',
-  'novaDesp', 'rmDesp', 'novoAjuste', 'rmAjuste', 'addOutro', 'rmOutro', 'csvTiny', 'tinyCsv', 'pdf', 'cancelarVenda', 'cancelarMov', 'contarCarga', 'precoModelo', 'baixarFotos', 'ajusteDeTx']);
+  'novaDesp', 'rmDesp', 'novoAjuste', 'rmAjuste', 'addOutro', 'rmOutro', 'csvTiny', 'tinyCsv', 'pdf', 'cancelarVenda', 'cancelarMov', 'contarCarga', 'reimportarCarga', 'excluirLote', 'restaurarLote', 'precoModelo', 'baixarFotos', 'ajusteDeTx']);
 const precisaGestor = el => { const a = el.dataset.a; return SO_GESTOR.has(a) || (a === 'ir' && el.dataset.v === 'catalogo') || (a === 'tab' && !ABAS_VENDEDOR.includes(el.dataset.t)); };
 const saveLote = l => { l.atualizado = now(); return DB.put('lotes', l); };
 
@@ -299,7 +299,7 @@ async function importarCarga(file, l) {
     let alvo = nums.length === 1 ? nums[0] : (nums.includes(String(l.pedido)) ? String(l.pedido) : null);
     if (!alvo) { alvo = await perguntar({ titulo: 'Qual pedido é deste lote?', texto: `O arquivo tem ${nums.length} pedidos.`, chips: nums.slice(0, 12), ok: 'Usar', obrig: true }); S.sheet = null; if (!alvo) throw new Error('Importação cancelada'); }
     linhasArq = linhasArq.filter(r => String(r[m.pedido]).trim() === String(alvo).trim());
-    if (!l.pedido) l.pedido = String(alvo).trim();
+    if (!l.pedido || S.reimport) l.pedido = String(alvo).trim(); // na reimportação vale o pedido do arquivo novo
     const c0 = linhasArq[0] || {}; const pega = (...t) => { const k = col(c0, ...t); return k ? String(c0[k]) : ''; };
     l.contatoTiny = { nome: pega(k => k === 'nome do contato' || k === 'nome do contato*'), tipo: pega(k => k === 'tipo de pessoa'), doc: pega(k => k === 'cpf/cnpj'), ie: pega(k => k === 'rg/ie'),
       cep: pega(k => k === 'cep'), mun: pega(k => k.startsWith('munic') && !k.includes('entrega')), uf: pega(k => k === 'uf'), end: pega(k => k.startsWith('endere') && !k.includes('nro') && !k.includes('entrega')),
@@ -319,7 +319,16 @@ async function importarCarga(file, l) {
   await aplicarCarga(l, carga, file.name);
   return { linhas, pecas: Object.values(carga).reduce((a, b) => a + b, 0), semCadastro: lista.length };
 }
-async function aplicarCarga(l, carga, nome) { l.carga = carga; l.cargaArquivo = nome; l.cargaEm = now(); l.cargaPor = `${S.cfg.vendedor || '?'}${gestor() ? '' : ' (vendedor)'}`; await saveLote(l); }
+async function aplicarCarga(l, carga, nome) {
+  // reimportação pelo gestor: guarda no histórico o que era e o que ficou; vendas e bonificações continuam
+  const ri = S.reimport && S.reimport.loteId === l.id ? S.reimport : null;
+  if (ri) { const pc = c => Object.values(c || {}).reduce((a, b) => a + b, 0);
+    (l.historico ||= []).push({ ts: now(), acao: 'carga reimportada', motivo: `${ri.motivo} · ${ri.arquivo || '—'} (${pc(ri.carga)} pç) → ${nome} (${pc(carga)} pç)${ri.pedido !== l.pedido ? ` · pedido ${ri.pedido || '—'} → ${l.pedido || '—'}` : ''}`, quem: S.cfg.vendedor });
+    S.reimport = null; if (S.sheet?.k === 'reimport') S.sheet = null; }
+  l.carga = carga; l.cargaArquivo = nome; l.cargaEm = now(); l.cargaPor = `${S.cfg.vendedor || '?'}${gestor() ? '' : ' (vendedor)'}`; await saveLote(l);
+  if (ri) { const acima = Object.entries(saldos(l)).filter(([, x]) => x.vendido + x.mov > x.carga).length;
+    if (acima) setTimeout(() => toast(`${acima} SKUs têm venda ou bonificação acima da nova carga: confira`, null, true), 1500); }
+}
 
 // ---------- carga a partir do PDF do pedido (ou da nota) do Tiny ----------
 let pdfjsPronto;
@@ -461,7 +470,8 @@ function topo(titulo, sub, voltar, extra = '') {
   <span class="net ${Sinc.selo()[0]}" data-a="ir" data-v="config">${seloHTML(Sinc.selo()[1])}</span></header><div class="faixa"></div>`;
 }
 function vHome() {
-  const lotes = [...S.lotes].sort((a, b) => (b.criado || '').localeCompare(a.criado || ''));
+  const lotes = S.lotes.filter(l => !l.excluido).sort((a, b) => (b.criado || '').localeCompare(a.criado || ''));
+  const excluidos = S.lotes.filter(l => l.excluido);
   const semCfg = !S.cfg.vendedor;
   return topo(null, 'PDV Shows', false, `<button class="iconbtn" data-a="ir" data-v="config" aria-label="Configurações">⚙</button>`) + `<main>
   ${semCfg ? `<div class="warn">Antes do primeiro show: em ⚙ informe seu nome e o nome deste caixa.</div>` : ''}
@@ -477,6 +487,10 @@ function vHome() {
       <div class="muted small" style="margin:4px 0 8px">${sh.map(s => esc(s.cidade) + '/' + s.uf).join(' · ') || 'sem show cadastrado'}</div>
       <div class="row"><span class="grow">${r.n} vendas · ${r.pecas} peças</span><b>${brl(r.liq)}</b></div></button>`; }).join('')
     : `<div class="empty">Nenhum lote ainda.<br>Crie um lote para cada pedido "Shows e Eventos" tirado no Tiny.</div>`}
+  ${gestor() && excluidos.length ? `<button class="btn block" style="margin-top:12px" data-a="verExcluidos">${S.verExcluidos ? 'Esconder' : 'Ver'} lotes excluídos (${excluidos.length})</button>
+  ${S.verExcluidos ? excluidos.map(l => `<div class="card" style="opacity:.75"><div class="row"><b class="grow">${l.pedido ? 'Pedido ' + esc(l.pedido) : 'Lote sem pedido'}</b><span class="pill">excluído</span></div>
+    <div class="muted small">${(l.shows || []).map(s => esc(s.cidade) + '/' + s.uf).join(' · ')} · ${resumo(l).n} vendas · ${fmtDT(l.excluido.ts)} · ${esc(l.excluido.quem)} · ${esc(l.excluido.motivo)}</div>
+    <button class="btn block" style="margin-top:8px;min-height:44px" data-a="restaurarLote" data-id="${l.id}">Restaurar lote</button></div>`).join('') : ''}` : ''}
   </main>`;
 }
 function vNovo() {
@@ -878,7 +892,7 @@ function renderSheet() {
   if (!el) { el = document.createElement('div'); el.id = 'sheet'; el.className = 'scrim'; document.body.appendChild(el); }
   const k = S.sheet.k; let h = '';
   if (k === 'modelo') h = shModelo(); if (k === 'cart') h = shCart(); if (k === 'pagar') h = shPagar(); if (k === 'show') h = shShow();
-  if (k === 'mov') h = shMov(); if (k === 'texto') h = shTexto(); if (k === 'cargaPrev') h = shCargaPrev(); if (k === 'ajuste') h = shAjuste(); if (k === 'despesa') h = shDespesa();
+  if (k === 'mov') h = shMov(); if (k === 'texto') h = shTexto(); if (k === 'cargaPrev') h = shCargaPrev(); if (k === 'ajuste') h = shAjuste(); if (k === 'despesa') h = shDespesa(); if (k === 'reimport') h = shReimport();
   el.innerHTML = `<div class="sheet" role="dialog"><div class="grab"></div>${h}</div>`;
 }
 function shModelo() {
@@ -926,10 +940,20 @@ function shShow() {
   <p class="muted small">As vendas entram no show marcado. Troque ao chegar na próxima cidade; a carga continua a mesma do lote.</p>
   ${(l.shows || []).map(s => `<button class="card" style="width:100%;text-align:left;${at && at.id === s.id ? 'border:2px solid var(--orange)' : ''}" data-a="usarShow" data-id="${s.id}"><div class="row"><b class="grow">${at && at.id === s.id ? '📍 ' : ''}${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</b>${at && at.id === s.id ? '<span class="pill aberto">ATUAL</span>' : ''}</div><div class="muted small">${esc(s.evento || '')}</div></button>`).join('')}
   <button class="btn block" style="margin-bottom:12px" data-a="exportarCaixa">Enviar minhas vendas (caixa) para o principal</button>
+  ${gestor() ? `<div class="card"><h2>Gestão do lote</h2><p class="muted small">Carga atual: ${Object.values(l.carga || {}).reduce((a, b) => a + b, 0)} peças · ${esc(l.cargaArquivo || (l.cargaManual ? 'contada no app' : 'sem carga'))}</p>
+    ${l.status !== 'fechado' && Object.keys(l.carga || {}).length ? `<button class="btn block" style="margin-bottom:8px" data-a="reimportarCarga">Reimportar carga (CSV ou PDF do Tiny)</button>` : ''}
+    <button class="btn danger block" data-a="excluirLote">Excluir lote</button></div>` : ''}
   ${l.status === 'aberto' ? `<form data-f="novoShow" class="card"><h2>Adicionar show</h2>
     <label class="f">Cidade<input class="i" name="cidade" required></label>
     <div class="grid2"><label class="f">UF<select class="i" name="uf" required><option value="">--</option>${UFS.map(u => `<option ${at && at.uf === u ? 'selected' : ''}>${u}</option>`).join('')}</select></label><label class="f">Data<input class="i" type="date" name="data" value="${dataNoite()}" required></label></div>
     <label class="f">Evento / local<input class="i" name="evento"></label><button class="btn primary block">Adicionar e usar</button></form>` : ''}`;
+}
+function shReimport() {
+  return `<div class="row"><h3 class="grow">Reimportar carga</h3><button class="iconbtn" data-a="cancelarReimport">✕</button></div>
+  <p class="muted small">Escolha o arquivo certo do pedido "Shows e Eventos". A carga atual é substituída; vendas, bonificações e contagem continuam.</p>
+  <label class="btn primary block" style="margin-bottom:8px">Pedido do Tiny (CSV)<input type="file" accept=".csv,.xls,.xlsx" class="hide" data-in="carga"></label>
+  <label class="btn block" style="margin-bottom:8px">PDF do pedido ou da nota<input type="file" accept=".pdf,application/pdf" class="hide" data-in="carga"></label>
+  <button class="btn block" data-a="cancelarReimport">Cancelar</button>`;
 }
 function shMov() {
   const st = S.sheet;
@@ -1104,7 +1128,22 @@ const A = {
     const d = new Date((ult.querySelector('[name=data]').value || today()) + 'T12:00'); d.setDate(d.getDate() + 1);
     box.insertAdjacentHTML('beforeend', blocoShow(bl.length + 1, d.toISOString().slice(0, 10), ult.querySelector('[name=uf]').value)); box.lastElementChild.querySelector('[name=cidade]').focus(); },
   rmShow: e => { e.closest('.showbloco').remove(); $('#shows').querySelectorAll('.showbloco h2').forEach((h, i) => h.textContent = 'Show ' + (i + 1)); },
-  usarCarga: async () => { const st = S.sheet; const l = lote(); if (st.pedido && !l.pedido) l.pedido = st.pedido; await aplicarCarga(l, st.carga, st.nome); S.sheet = null; render(); toast(`Carga: ${Object.values(st.carga).reduce((a, b) => a + b, 0)} peças em ${Object.keys(st.carga).length} SKUs`); },
+  reimportarCarga: async () => { const l = lote();
+    const m = await perguntar({ titulo: 'Reimportar a carga?', texto: `A carga atual (${Object.values(l.carga || {}).reduce((a, b) => a + b, 0)} peças, ${l.cargaArquivo || 'contada no app'}) será substituída pelo arquivo novo. Vendas e bonificações ficam.${l.status === 'contagem' ? ' A contagem já feita fica, mas as diferenças são recalculadas.' : ''}`, ph: 'motivo (obrigatório)', obrig: true, ok: 'Escolher arquivo', perigo: true, chips: ['Importei o pedido errado', 'Pedido alterado no Tiny', 'Arquivo incompleto'] });
+    if (!m) { S.sheet = null; return render(); }
+    S.reimport = { loteId: l.id, motivo: m, arquivo: l.cargaArquivo || (l.cargaManual ? 'contada no app' : ''), carga: { ...(l.carga || {}) }, pedido: l.pedido };
+    S.sheet = { k: 'reimport' }; renderSheet(); },
+  cancelarReimport: () => { S.reimport = null; S.sheet = null; render(); },
+  excluirLote: async () => { const l = lote(); const r = resumo(l);
+    const m = await perguntar({ titulo: 'Excluir este lote?', texto: `${l.pedido ? 'Pedido ' + l.pedido : 'Lote sem pedido'} · ${r.n} vendas (${brl(r.liq)}). Ele sai da lista em todos os celulares. Vendas e bonificações ficam guardadas e o gestor pode restaurar o lote na tela inicial.`, ph: 'motivo (obrigatório)', obrig: true, ok: 'Excluir lote', perigo: true, chips: ['Lote criado por engano', 'Lote duplicado', 'Teste'] });
+    S.sheet = null; if (!m) return render();
+    l.excluido = { ts: now(), quem: S.cfg.vendedor, motivo: m }; (l.historico ||= []).push({ ts: now(), acao: 'lote excluído', motivo: m, quem: S.cfg.vendedor });
+    await saveLote(l); S.loteId = null; S.view = 'home'; render(); toast('Lote excluído'); },
+  restaurarLote: async e => { const l = S.lotes.find(x => x.id === e.dataset.id); if (!l) return;
+    (l.historico ||= []).push({ ts: now(), acao: 'lote restaurado', motivo: l.excluido?.motivo || '', quem: S.cfg.vendedor }); delete l.excluido;
+    await saveLote(l); render(); toast('Lote restaurado'); },
+  verExcluidos: () => { S.verExcluidos = !S.verExcluidos; render(); },
+  usarCarga: async () => { const st = S.sheet; const l = lote(); if (st.pedido && (!l.pedido || S.reimport)) l.pedido = st.pedido; await aplicarCarga(l, st.carga, st.nome); S.sheet = null; render(); toast(`Carga: ${Object.values(st.carga).reduce((a, b) => a + b, 0)} peças em ${Object.keys(st.carga).length} SKUs`); },
   fecharLote: async () => { const l = lote(); const sd = saldos(l); const ret = l.retorno || {};
     const semObs = Object.keys(sd).filter(s => (sd[s].carga || sd[s].vendido || sd[s].mov) && (ret[s] ?? 0) - sd[s].saldo !== 0 && !((l.obsDif || {})[s] || '').trim());
     if (semObs.length) { toast(`Falta observação em ${semObs.length} divergência(s)`, null, true); return; }
@@ -1119,7 +1158,7 @@ const A = {
   precoModelo: async e => { const id = e.dataset.m; const ps = [...S.produtos.values()].filter(p => modeloDe(p) === id); const v = await perguntar({ titulo: 'Preço de show', texto: nomeModelo(ps[0]), tipo: 'num', valor: ps[0].precoShow ? String(ps[0].precoShow).replace('.', ',') : '', ph: 'vazio = preço do Tiny', ok: 'Salvar' }); S.sheet = null; if (v !== null && v !== undefined) { ps.forEach(p => p.precoShow = num(v) || 0); await DB.bulk('produtos', ps); } render(); },
   baixarFotos: () => baixarFotos(),
   sincAgora: async () => { toast('Sincronizando…'); await Sinc.ciclo(true); toast(Sinc.erro ? 'Erro: ' + Sinc.erro : `Sincronizado · ${Sinc.nPend()} pendentes`, null, !!Sinc.erro); if (S.view === 'config') render(); },
-  enviarConfig: () => { const abertos = S.lotes.filter(l => l.status !== 'fechado'); const ids = new Set(abertos.map(l => l.id));
+  enviarConfig: () => { const abertos = S.lotes.filter(l => l.status !== 'fechado' && !l.excluido); const ids = new Set(abertos.map(l => l.id));
     const pac = { tipo: 'pacote', versao: 1, em: now(), de: S.cfg.caixa, produtos: [...S.produtos.values()].map(({ _rot, ...p }) => p), tabela: S.tabela, tabelaInfo: S.tabelaInfo,
       custos: S.custos, custosInfo: S.custosInfo, cfg: { cfopBonif: S.cfg.cfopBonif, cfopPerda: S.cfg.cfopPerda, taxas: S.cfg.taxas, das: S.cfg.das, dasRef: S.cfg.dasRef, comissaoPct: S.cfg.comissaoPct, pinHash: S.cfg.pinHash || '', sincUrl: S.cfg.sincUrl || '', sincChave: S.cfg.sincChave || '' },
       lotes: abertos, vendas: S.vendas.filter(v => ids.has(v.loteId)), movs: S.movs.filter(m => ids.has(m.loteId)) };
