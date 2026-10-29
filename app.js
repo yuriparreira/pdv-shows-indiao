@@ -73,6 +73,7 @@ const Sinc = {
     if (store === 'vendas' || store === 'movs') { obj.atualizado = now(); chave = (store === 'vendas' ? 'venda:' : 'mov:') + obj.id; }
     if (store === 'meta' && obj.k === 'tabela') chave = 'tabela:atual';
     if (store === 'meta' && obj.k === 'custos') chave = 'custos:atual';
+    if (store === 'meta' && obj.k === 'equipe') chave = 'equipe:atual';
     if (store === 'produtos') { chave = 'catalogo:atual'; this.st.catVer = now(); }
     if (!chave) return;
     this.st.pend[chave] = ++this.cont; this.salvar();
@@ -91,6 +92,7 @@ const Sinc = {
       return Array.from({ length: n }, (_, i) => ({ ...base, tipo, id: 'parte' + i, atualizado: ver, json: JSON.stringify({ ver, i, n, txt: txt.slice(i * tam, (i + 1) * tam) }) })); };
     if (tipo === 'tabela') { const em = S.tabelaInfo?.em || now(); return partes('tabela', em, { v: S.tabela, em, arq: S.tabelaInfo?.arq || '' }); }
     if (tipo === 'custos') { const em = S.custosInfo?.em || now(); return partes('custos', em, { v: S.custos, em, arq: S.custosInfo?.arq || '' }); }
+    if (tipo === 'equipe') { const em = S.equipeEm || now(); return [{ ...base, tipo, id: 'atual', atualizado: em, json: JSON.stringify({ v: S.equipe, em }) }]; }
     if (tipo === 'catalogo') return partes('catalogo', this.st.catVer || now(), [...S.produtos.values()].map(({ _rot, ...p }) => p));
     return null;
   },
@@ -138,6 +140,7 @@ const Sinc = {
     }
     if (t === 'tabela') { if (S.tabelaInfo?.em && S.tabelaInfo.em >= doc.em) return false; S.tabela = doc.v || {}; S.tabelaInfo = { em: doc.em, arq: doc.arq }; await DB.put('meta', { k: 'tabela', v: S.tabela, em: doc.em, arq: doc.arq }, true); return true; }
     if (t === 'custos') { if (S.custosInfo?.em && S.custosInfo.em >= doc.em) return false; S.custos = doc.v || {}; S.custosInfo = { em: doc.em, arq: doc.arq }; await DB.put('meta', { k: 'custos', v: S.custos, em: doc.em, arq: doc.arq }, true); return true; }
+    if (t === 'equipe') { if (S.equipeEm && S.equipeEm >= doc.em) return false; S.equipe = doc.v || []; S.equipeEm = doc.em; await DB.put('meta', { k: 'equipe', v: S.equipe, em: doc.em }, true); return true; }
     if (t === 'catalogo') {
       // só recusa se este aparelho já tem um catálogo completo mais novo (produtos criados pela carga não contam)
       if (this.st.catFull && this.st.catVer && this.st.catVer >= o.ver) return false;
@@ -171,7 +174,7 @@ const S = {
   produtos: new Map(), lotes: [], vendas: [], movs: [], custos: {}, cfg: { vendedor: '', caixa: '', tema: 'dark', aparelho: '', cfopBonif: '5.910 / 6.910', cfopPerda: '5.927',
     taxas: { debito: 1.37, c1: 3.14, c2: 5.38, c3: 6.12, c4: 6.86, c5: 7.60, c6: 8.34 }, das: 0, comissaoPct: 0 }, tabela: {}, miniaturas: { skus: {} },
   view: 'home', loteId: null, tab: 'vender', busca: '', cat: '', todoCatalogo: false, esgotados: false,
-  cart: [], cartDesc: 0, cartDescMotivo: '', pagamentos: [], sheet: null, contagemRevelada: false, infinite: null,
+  equipe: [], cart: [], cartDesc: 0, cartDescMotivo: '', pagamentos: [], sheet: null, contagemRevelada: false, infinite: null,
 };
 const lote = () => S.lotes.find(l => l.id === S.loteId);
 const saveCfg = () => DB.put('meta', { k: 'cfg', v: S.cfg });
@@ -187,9 +190,31 @@ async function entrarGestor() {
   if (await hashPin(pin) !== S.cfg.pinHash) { render(); toast('PIN incorreto', null, true); return false; }
   Perfil.ate = Date.now() + 15 * 60e3; render(); toast('Modo gestor (sai sozinho após 15 min parado)'); return true;
 }
-const ABAS_VENDEDOR = ['vender', 'movs', 'contagem'];
+// Equipe de vendas: o gestor cadastra cada vendedor com um PIN pessoal (⚙). No celular, o vendedor entra com o PIN e
+// só vê as próprias vendas e bonificações; a venda grava quem vendeu. A equipe sincroniza entre os celulares.
+const equipeAtiva = () => (S.equipe || []).filter(p => p.ativo !== false);
+const temEquipe = () => equipeAtiva().length > 0;
+const SESSAO_H = 12; // a sessão do vendedor vence em 12 h (show seguinte pede o PIN de novo)
+const sessao = () => { const x = S.cfg.sessao; return x && Date.now() - new Date(x.em) < SESSAO_H * 3600e3 && equipeAtiva().some(p => p.id === x.id) ? x : null; };
+const nomeVendedor = () => sessao()?.nome || S.cfg.vendedor;
+const minha = x => gestor() || !temEquipe() || (x.vendedorId ? x.vendedorId === sessao()?.id : (x.vendedor || x.quem) === sessao()?.nome);
+const codCaixa = () => (S.cfg.caixaCod || 'C' + (S.cfg.aparelho || 'X').slice(-3)).toUpperCase();
+const numVenda = v => v.cx ? `${v.cx}-${v.num}` : `#${v.num}`;
+const pinVendedor = (id, pin) => hashPin(id + ':' + pin);
+async function salvarEquipe() { S.equipeEm = now(); await DB.put('meta', { k: 'equipe', v: S.equipe, em: S.equipeEm }); }
+async function entrarVendedor() {
+  const nome = await perguntar({ titulo: 'Quem está vendendo?', texto: 'Toque no seu nome e depois digite o seu PIN.', chips: equipeAtiva().map(p => p.nome), ph: 'seu nome', obrig: true, ok: 'Continuar' });
+  S.sheet = null; if (!nome) { render(); return false; }
+  const p = equipeAtiva().find(x => x.nome.toLowerCase() === String(nome).trim().toLowerCase());
+  if (!p) { render(); toast('Nome não cadastrado na equipe. Fale com o gestor.', null, true); return false; }
+  const pin = await perguntar({ titulo: `PIN de ${p.nome}`, tipo: 'pin', ph: 'seu PIN', obrig: true, ok: 'Entrar' }); S.sheet = null;
+  if (!pin) { render(); return false; }
+  if (await pinVendedor(p.id, pin) !== p.pinHash) { render(); toast('PIN incorreto', null, true); return false; }
+  S.cfg.sessao = { id: p.id, nome: p.nome, em: now() }; await saveCfg(); S.cart = []; S.cartDesc = 0; S.pagamentos = []; render(); toast(`Vendendo como ${p.nome}`); return true;
+}
+const ABAS_VENDEDOR = ['vender', 'vendas', 'movs', 'contagem'];
 const SO_GESTOR = new Set(['importarCaixa', 'destravar', 'fecharLote', 'corrigirData', 'precoItem', 'reabrirFin', 'concluirFin', 'enviarConfig', 'backupTudo', 'sincAgora',
-  'novaDesp', 'rmDesp', 'novoAjuste', 'rmAjuste', 'addOutro', 'rmOutro', 'csvTiny', 'tinyCsv', 'pdf', 'cancelarVenda', 'cancelarMov', 'contarCarga', 'reimportarCarga', 'excluirLote', 'restaurarLote', 'precoModelo', 'baixarFotos', 'ajusteDeTx']);
+  'novaDesp', 'rmDesp', 'novoAjuste', 'rmAjuste', 'addOutro', 'rmOutro', 'csvTiny', 'tinyCsv', 'pdf', 'cancelarVenda', 'cancelarMov', 'contarCarga', 'reimportarCarga', 'excluirLote', 'restaurarLote', 'precoModelo', 'baixarFotos', 'ajusteDeTx', 'addVend', 'pinVend', 'ativoVend']);
 const precisaGestor = el => { const a = el.dataset.a; return SO_GESTOR.has(a) || (a === 'ir' && el.dataset.v === 'catalogo') || (a === 'tab' && !ABAS_VENDEDOR.includes(el.dataset.t)); };
 const saveLote = l => { l.atualizado = now(); return DB.put('lotes', l); };
 
@@ -323,7 +348,7 @@ async function aplicarCarga(l, carga, nome) {
   // reimportação pelo gestor: guarda no histórico o que era e o que ficou; vendas e bonificações continuam
   const ri = S.reimport && S.reimport.loteId === l.id ? S.reimport : null;
   if (ri) { const pc = c => Object.values(c || {}).reduce((a, b) => a + b, 0);
-    (l.historico ||= []).push({ ts: now(), acao: 'carga reimportada', motivo: `${ri.motivo} · ${ri.arquivo || '—'} (${pc(ri.carga)} pç) → ${nome} (${pc(carga)} pç)${ri.pedido !== l.pedido ? ` · pedido ${ri.pedido || '—'} → ${l.pedido || '—'}` : ''}`, quem: S.cfg.vendedor });
+    (l.historico ||= []).push({ ts: now(), acao: 'carga reimportada', motivo: `${ri.motivo} · ${ri.arquivo || '—'} (${pc(ri.carga)} pç) → ${nome} (${pc(carga)} pç)${ri.pedido !== l.pedido ? ` · pedido ${ri.pedido || '—'} → ${l.pedido || '—'}` : ''}`, quem: nomeVendedor() });
     S.reimport = null; if (S.sheet?.k === 'reimport') S.sheet = null; }
   l.carga = carga; l.cargaArquivo = nome; l.cargaEm = now(); l.cargaPor = `${S.cfg.vendedor || '?'}${gestor() ? '' : ' (vendedor)'}`; await saveLote(l);
   if (ri) { const acima = Object.entries(saldos(l)).filter(([, x]) => x.vendido + x.mov > x.carga).length;
@@ -429,7 +454,7 @@ async function importarTabela(file) {
 }
 
 // ---------- cálculos do lote ----------
-const vendasLote = (l, incluirCanc) => S.vendas.filter(v => v.loteId === l.id && (incluirCanc || v.status !== 'cancelada'));
+const vendasLote = (l, incluirCanc, soMinhas) => S.vendas.filter(v => v.loteId === l.id && (incluirCanc || v.status !== 'cancelada') && (!soMinhas || minha(v)));
 const movsLote = l => S.movs.filter(m => m.loteId === l.id && m.status !== 'cancelada');
 function saldos(l) {
   const r = {}; const g = sku => (r[sku] ||= { carga: 0, vendido: 0, mov: 0, movTipo: {}, valor: 0 });
@@ -441,9 +466,9 @@ function saldos(l) {
   return r;
 }
 function totalVenda(v) { const b = v.itens.reduce((a, i) => a + i.qtd * i.preco, 0); return { bruto: b, liq: b - (v.desconto || 0) }; }
-function resumo(l, showId) {
-  const vs = vendasLote(l).filter(v => !showId || v.showId === showId);
-  const o = { n: vs.length, pecas: 0, bruto: 0, desc: 0, liq: 0, formas: {}, canc: vendasLote(l, true).filter(v => v.status === 'cancelada' && (!showId || v.showId === showId)).length };
+function resumo(l, showId, soMinhas) {
+  const vs = vendasLote(l, false, soMinhas).filter(v => !showId || v.showId === showId);
+  const o = { n: vs.length, pecas: 0, bruto: 0, desc: 0, liq: 0, formas: {}, canc: vendasLote(l, true, soMinhas).filter(v => v.status === 'cancelada' && (!showId || v.showId === showId)).length };
   vs.forEach(v => { const t = totalVenda(v); o.bruto += t.bruto; o.desc += v.desconto || 0; o.liq += t.liq; v.itens.forEach(i => o.pecas += i.qtd); v.pagamentos.forEach(p => o.formas[p.forma] = (o.formas[p.forma] || 0) + p.valor); });
   o.ticket = o.n ? o.liq / o.n : 0; return o;
 }
@@ -456,6 +481,7 @@ function render() {
   const v = S.view;
   if (!gestor() && v === 'catalogo') S.view = 'home';
   if (S.view === 'lote' && !gestor() && !ABAS_VENDEDOR.includes(S.tab)) S.tab = 'vender';
+  if (!gestor() && temEquipe() && !sessao() && S.view !== 'config') { app.innerHTML = vLogin(); renderSheet(); return; }
   if (S.view === 'home') app.innerHTML = vHome();
   else if (S.view === 'novo') app.innerHTML = vNovo();
   else if (S.view === 'catalogo') app.innerHTML = vCatalogo();
@@ -466,8 +492,14 @@ function render() {
 function topo(titulo, sub, voltar, extra = '') {
   return `<header class="top">${voltar ? `<button class="iconbtn" data-a="voltar" aria-label="Voltar">‹</button>` : ''}
   ${titulo === null ? `<img class="logo" src="marca/logo-negativo.svg" alt="Indião Store"><h1><span class="sub">${esc(sub)}</span></h1>` : `<h1>${esc(titulo)}${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</h1>`}${extra}
-  ${S.cfg.pinHash ? `<button class="net ${gestor() ? 'on' : ''}" data-a="perfil" aria-label="Trocar perfil">${gestor() ? '🔓<span class="txt"> gestor</span>' : '👤<span class="txt"> vendedor</span>'}</button>` : ''}
+  ${S.cfg.pinHash || temEquipe() ? `<button class="net ${gestor() ? 'on' : ''}" data-a="perfil" aria-label="Trocar perfil">${gestor() && S.cfg.pinHash ? '🔓<span class="txt"> gestor</span>' : `👤<span class="txt"> ${esc(sessao()?.nome || 'vendedor')}</span>`}</button>` : ''}
   <span class="net ${Sinc.selo()[0]}" data-a="ir" data-v="config">${seloHTML(Sinc.selo()[1])}</span></header><div class="faixa"></div>`;
+}
+function vLogin() {
+  return topo(null, 'PDV Shows', false, `<button class="iconbtn" data-a="ir" data-v="config" aria-label="Configurações">⚙</button>`) + `<main>
+  <div class="card"><h2>Quem está vendendo?</h2><p class="muted small">Cada vendedor entra com o próprio PIN. A venda fica no seu nome e você vê só as suas vendas.</p>
+  <button class="btn primary block" style="min-height:64px" data-a="entrarVendedor">Entrar com meu PIN</button></div>
+  <button class="btn block" data-a="entrarGestor">Entrar como gestor</button></main>`;
 }
 function vHome() {
   const lotes = S.lotes.filter(l => !l.excluido).sort((a, b) => (b.criado || '').localeCompare(a.criado || ''));
@@ -481,11 +513,11 @@ function vHome() {
     <button class="btn" data-a="ir" data-v="catalogo">Catálogo (${S.produtos.size})</button>
     <button class="btn" data-a="importarCaixa">Receber arquivo</button>
   </div>` : `<p class="muted small">Modo vendedor: crie o lote ou abra o do show. Catálogo e recebimento de arquivos são do gestor.</p>`}
-  ${lotes.length ? lotes.map(l => { const r = resumo(l); const sh = l.shows || [];
+  ${lotes.length ? lotes.map(l => { const r = resumo(l, null, true); const sh = l.shows || [];
     return `<button class="card" style="width:100%;text-align:left" data-a="abrirLote" data-id="${l.id}">
       <div class="row"><b class="grow">${l.pedido ? 'Pedido ' + esc(l.pedido) : 'Lote sem pedido'}</b><span class="pill ${l.status}">${l.status}</span></div>
       <div class="muted small" style="margin:4px 0 8px">${sh.map(s => esc(s.cidade) + '/' + s.uf).join(' · ') || 'sem show cadastrado'}</div>
-      <div class="row"><span class="grow">${r.n} vendas · ${r.pecas} peças</span><b>${brl(r.liq)}</b></div></button>`; }).join('')
+      <div class="row"><span class="grow">${!gestor() && temEquipe() ? 'Suas vendas: ' : ''}${r.n} vendas · ${r.pecas} peças</span><b>${brl(r.liq)}</b></div></button>`; }).join('')
     : `<div class="empty">Nenhum lote ainda.<br>Crie um lote para cada pedido "Shows e Eventos" tirado no Tiny.</div>`}
   ${gestor() && excluidos.length ? `<button class="btn block" style="margin-top:12px" data-a="verExcluidos">${S.verExcluidos ? 'Esconder' : 'Ver'} lotes excluídos (${excluidos.length})</button>
   ${S.verExcluidos ? excluidos.map(l => `<div class="card" style="opacity:.75"><div class="row"><b class="grow">${l.pedido ? 'Pedido ' + esc(l.pedido) : 'Lote sem pedido'}</b><span class="pill">excluído</span></div>
@@ -516,10 +548,16 @@ function vConfig() {
   return topo('Configurações', '', true) + `<main><form data-f="cfg">
   <label class="f">Seu nome (vendedor)<input class="i" name="vendedor" value="${esc(S.cfg.vendedor)}" required></label>
   <label class="f">Nome deste caixa / aparelho<input class="i" name="caixa" value="${esc(S.cfg.caixa)}" placeholder="ex.: Caixa 1 · Maquininha 6368" required></label>
+  <label class="f">Código do caixa (curto e diferente em cada celular; entra no número da venda)<input class="i" name="caixaCod" value="${esc(S.cfg.caixaCod || '')}" maxlength="4" placeholder="${esc(codCaixa())} (ex.: C1, C2)" style="text-transform:uppercase"></label>
+  ${temEquipe() ? `<p class="muted small">Com equipe cadastrada, a venda vai para quem entrou com o PIN${sessao() ? ' (agora: ' + esc(sessao().nome) + ')' : ''}. "Seu nome" vale só quando o gestor vende sem entrar como vendedor.</p>` : ''}
   <label class="f">Tema<select class="i" name="tema"><option value="dark" ${S.cfg.tema !== 'light' ? 'selected' : ''}>Escuro (show à noite)</option><option value="light" ${S.cfg.tema === 'light' ? 'selected' : ''}>Claro (sol forte)</option></select></label>
   ${!gestor() ? `<button class="btn primary block">Salvar</button></form><div class="card" style="margin-top:16px"><h2>Perfil</h2><p class="muted small">Modo vendedor: vender, lançar bonificação e contar. O restante é do gestor.</p><button class="btn block" data-a="perfil">Entrar como gestor</button></div></main>` : `
   <div class="card"><h2>PIN do gestor</h2><p class="muted small">${S.cfg.pinHash ? 'PIN definido. Para trocar, digite um novo.' : 'Sem PIN, qualquer pessoa acessa tudo.'} Com PIN, o app abre em modo vendedor (venda, bonificação e contagem) e o gestor entra pelo selo "👤 vendedor" no topo. O PIN vai junto no "Enviar configuração".</p>
   <div class="grid2"><label class="f">Novo PIN (4 a 8 números)<input class="i" name="pinNovo" type="password" inputmode="numeric" autocomplete="off"></label><label class="f">Repetir PIN<input class="i" name="pinConf" type="password" inputmode="numeric" autocomplete="off"></label></div></div>
+  <div class="card"><h2>Equipe de vendas</h2><p class="muted small">Cada vendedor entra no celular com o próprio PIN, vende no próprio nome e vê só as próprias vendas e bonificações. A lista vai para todos os celulares pela sincronização e no "Enviar configuração". Sem ninguém cadastrado, o app funciona como antes (nome do celular).</p>
+  ${(S.equipe || []).map(p => `<div class="line"><div class="grow"><b>${esc(p.nome)}</b><div class="muted small">${p.ativo === false ? 'desativado' : 'ativo'} · PIN ${p.pinEm ? 'definido em ' + fmtDT(p.pinEm) : 'definido'}</div></div>
+    <button type="button" class="btn" style="min-height:40px" data-a="pinVend" data-id="${p.id}">Trocar PIN</button><button type="button" class="btn" style="min-height:40px" data-a="ativoVend" data-id="${p.id}">${p.ativo === false ? 'Reativar' : 'Desativar'}</button></div>`).join('') || '<p class="muted small">Ninguém cadastrado.</p>'}
+  <button type="button" class="btn block" style="margin-top:8px" data-a="addVend">+ Cadastrar vendedor</button></div>
   <div class="card"><h2>Notas à parte (relatório)</h2>
   <label class="f">CFOP da bonificação<input class="i" name="cfopBonif" value="${esc(S.cfg.cfopBonif)}"></label>
   <label class="f">CFOP da perda de contagem<input class="i" name="cfopPerda" value="${esc(S.cfg.cfopPerda)}"></label></div>
@@ -600,10 +638,11 @@ function vLote() {
   return topo(l.pedido ? 'Pedido ' + l.pedido : 'Lote', sh ? `${sh.cidade}/${sh.uf} · ${fmtD(sh.data)}` : 'sem show', true,
     `<button class="iconbtn" data-a="sheetShow" aria-label="Trocar show">📍</button>`) +
     `<nav class="tabs">${tabs.map(([k, n]) => `<button class="tab ${S.tab === k ? 'on' : ''}" data-a="tab" data-t="${k}">${n}</button>`).join('')}</nav>
-    ${(S.tab === 'vender' || S.tab === 'vendas') && (l.shows || []).length ? `<div class="showbar">${l.shows.map(s => `<button class="showchip ${sh && sh.id === s.id ? 'on' : ''}" ${l.status === 'aberto' ? `data-a="usarShow" data-id="${s.id}"` : 'disabled'}>${sh && sh.id === s.id ? '📍 ' : ''}<b>${esc(s.cidade)}/${s.uf}</b><small>${fmtD(s.data).slice(0, 5)} · ${resumo(l, s.id).n} vendas</small></button>`).join('')}</div>` : ''}
+    ${(S.tab === 'vender' || S.tab === 'vendas') && (l.shows || []).length ? `<div class="showbar">${l.shows.map(s => `<button class="showchip ${sh && sh.id === s.id ? 'on' : ''}" ${l.status === 'aberto' ? `data-a="usarShow" data-id="${s.id}"` : 'disabled'}>${sh && sh.id === s.id ? '📍 ' : ''}<b>${esc(s.cidade)}/${s.uf}</b><small>${fmtD(s.data).slice(0, 5)} · ${resumo(l, s.id, true).n} vendas</small></button>`).join('')}</div>` : ''}
     <main>${body}</main>${S.tab === 'vender' && !fechado ? cartBar() : ''}`;
 }
 function tVender(l) {
+  const quem = temEquipe() ? `<div class="row" style="margin-bottom:8px"><span class="grow small muted">Vendendo como <b>${esc(nomeVendedor() || '—')}</b>${S.cfg.caixa ? ' · ' + esc(S.cfg.caixa) : ''} · caixa ${esc(codCaixa())}</span><button class="btn" style="min-height:40px" data-a="trocarVendedor">Trocar vendedor</button></div>` : '';
   if (!Object.keys(l.carga || {}).length) return `<div class="card"><h2>Falta a carga deste lote</h2>
     <p class="muted small">A carga é o que foi retirado do estoque no pedido "Shows e Eventos". A venda só mostra esses itens. Sem carga, o app não controla o saldo.</p>
     <label class="btn primary block">Importar pedido do Tiny (CSV)<input type="file" accept=".csv,.xls,.xlsx" class="hide" data-in="carga"></label>
@@ -621,7 +660,7 @@ function tVender(l) {
   vis.sort((a, b) => (!precoShow(a.skus[0])) - (!precoShow(b.skus[0])) || vend(b) - vend(a) || a.nome.localeCompare(b.nome));
   const temSaldo = m => m.skus.some(p => (sd[p.sku]?.saldo || 0) > 0);
   const nEsg = vis.filter(m => !temSaldo(m)).length; const lista = (S.esgotados || S.todoCatalogo) ? vis : vis.filter(temSaldo);
-  return aviso + `<div class="search"><input class="i" style="width:100%" type="search" placeholder="Buscar modelo ou SKU" value="${esc(S.busca)}" data-in="busca" enterkeyhint="search"></div>
+  return quem + aviso + `<div class="search"><input class="i" style="width:100%" type="search" placeholder="Buscar modelo ou SKU" value="${esc(S.busca)}" data-in="busca" enterkeyhint="search"></div>
   <div class="chips"><button class="chip ${!S.cat ? 'on' : ''}" data-a="cat" data-c="">Todos</button>${cats.map(c => `<button class="chip ${S.cat === c ? 'on' : ''}" data-a="cat" data-c="${esc(c)}">${esc(c)}</button>`).join('')}
   ${nEsg && !S.todoCatalogo ? `<button class="chip ${S.esgotados ? 'on' : ''}" data-a="esgotados">Esgotados (${nEsg})</button>` : ''}
   <button class="chip ${S.todoCatalogo ? 'on' : ''}" data-a="todoCat">Fora da carga</button></div>
@@ -652,17 +691,17 @@ function cartBar() {
   </div></div>`;
 }
 function tVendas(l) {
-  const vs = vendasLote(l, true).sort((a, b) => b.ts.localeCompare(a.ts)); const shows = Object.fromEntries((l.shows || []).map(s => [s.id, s]));
-  return `<div class="muted small" style="margin-bottom:8px">${vs.length} registros (inclui canceladas)</div>` + (vs.map(v => { const t = totalVenda(v);
-    return `<div class="card" style="${v.status === 'cancelada' ? 'opacity:.55' : ''}"><div class="row"><b class="grow">#${v.num} · ${fmtDT(v.ts)}</b><b>${brl(t.liq)}</b></div>
+  const vs = vendasLote(l, true, true).sort((a, b) => b.ts.localeCompare(a.ts)); const shows = Object.fromEntries((l.shows || []).map(s => [s.id, s])); const r = resumo(l, null, true);
+  return `<div class="muted small" style="margin-bottom:8px">${!gestor() && temEquipe() ? `Suas vendas (${esc(sessao()?.nome || '')}): ${r.n} · ${brl(r.liq)} · ` : ''}${vs.length} registros (inclui canceladas)</div>` + (vs.map(v => { const t = totalVenda(v);
+    return `<div class="card" style="${v.status === 'cancelada' ? 'opacity:.55' : ''}"><div class="row"><b class="grow">${numVenda(v)} · ${fmtDT(v.ts)}</b><b>${brl(t.liq)}</b></div>
     <div class="small muted">${esc(shows[v.showId]?.cidade || '')} · ${esc(v.vendedor)} · ${esc(v.caixa)}</div>
     <div class="small" style="margin:6px 0">${v.itens.map(i => `${i.qtd}× ${esc(S.produtos.get(i.sku)?.descricao || i.sku)} (${brl(i.preco)})`).join('<br>')}</div>
     <div class="small">${v.pagamentos.map(p => (p.nome || FORMA[p.forma]) + ' ' + brl(p.valor) + (p.parcelas > 1 ? ` ${p.parcelas}x` : '')).join(' + ')}${v.desconto ? ` · desconto ${brl(v.desconto)} (${esc(v.descMotivo || 'sem motivo')})` : ''}${v.troco ? ` · troco ${brl(v.troco)}` : ''}</div>
-    ${v.status === 'cancelada' ? `<div class="small neg">Cancelada: ${esc(v.motivoCanc)}</div>` : (l.status !== 'fechado' ? `<button class="btn danger" style="margin-top:8px;min-height:44px" data-a="cancelarVenda" data-id="${v.id}">Cancelar venda</button>` : '')}</div>`; }).join('') || '<div class="empty">Nenhuma venda ainda.</div>');
+    ${v.status === 'cancelada' ? `<div class="small neg">Cancelada: ${esc(v.motivoCanc)}</div>` : (l.status !== 'fechado' ? `<button class="btn danger" style="margin-top:8px;min-height:44px" data-a="cancelarVenda" data-id="${v.id}">Cancelar venda${gestor() ? '' : ' (gestor)'}</button>` : '')}</div>`; }).join('') || '<div class="empty">Nenhuma venda ainda.</div>');
 }
 function tMovs(l) {
-  const ms = S.movs.filter(m => m.loteId === l.id).sort((a, b) => b.ts.localeCompare(a.ts));
-  const tot = {}; movsLote(l).forEach(m => tot[m.tipo] = (tot[m.tipo] || 0) + m.qtd);
+  const ms = S.movs.filter(m => m.loteId === l.id && minha(m)).sort((a, b) => b.ts.localeCompare(a.ts));
+  const tot = {}; movsLote(l).filter(minha).forEach(m => tot[m.tipo] = (tot[m.tipo] || 0) + m.qtd);
   return (l.status !== 'fechado' ? `<p class="muted small">Toda peça que sai sem venda precisa entrar aqui, senão aparece como falta na contagem.</p>
   <div class="pays" style="margin-top:0">${MOV_TIPOS.map(t => `<button class="pay" data-a="novoMov" data-t="${t.id}">${esc(t.nome)}<small>${esc(t.dica)}</small></button>`).join('')}</div>` : '') +
   `<div class="kpis" style="margin-bottom:12px">${MOV_TIPOS.map(t => `<div class="kpi"><b>${tot[t.id] || 0}</b><span>${esc(t.nome)}</span></div>`).join('')}</div>` +
@@ -718,7 +757,7 @@ function cardInfinite(l) {
   <div class="kpis"><div class="kpi"><b>${brl(a.bruto)}</b><span>bruto aprovado</span></div><div class="kpi"><b>${brl(a.taxa)}</b><span>taxas (${a.brutoCartao ? (a.taxa / a.brutoCartao * 100).toFixed(2).replace('.', ',') : 0}% dos cartões)</span></div>
   <div class="kpi"><b>${brl(a.liq)}</b><span>líquido a receber</span></div><div class="kpi"><b class="${a.semPdv.length || a.semTx.length ? 'neg' : 'zerot'}">${a.conciliadas}/${a.pags}</b><span>pagamentos do PDV conciliados</span></div></div>
   ${a.semPdv.length ? `<div class="warn" style="margin-top:12px"><b>${a.semPdv.length} transações sem venda no PDV</b> (${brl(a.semPdv.reduce((x, t) => x + t.valor, 0))}): venda não registrada ou valor diferente.<br>${a.semPdv.slice(0, 8).map(t => `${fmtDT(t.t)} · ${FORMA[t.forma]} ${brl(t.valor)} · ${esc(t.term)}`).join('<br>')}${a.semPdv.length > 8 ? '<br>…' : ''}</div>` : ''}
-  ${a.semTx.length ? `<div class="warn"><b>${a.semTx.length} pagamentos do PDV sem transação</b>: confira valor e forma.<br>${a.semTx.slice(0, 8).map(p => `Venda #${p.num} · ${FORMA[p.forma]} ${brl(p.valor)}`).join('<br>')}</div>` : ''}
+  ${a.semTx.length ? `<div class="warn"><b>${a.semTx.length} pagamentos do PDV sem transação</b>: confira valor e forma.<br>${a.semTx.slice(0, 8).map(p => `Venda ${numVenda(p)} · ${FORMA[p.forma]} ${brl(p.valor)}`).join('<br>')}</div>` : ''}
   ${a.negadas.length ? `<p class="small muted">${a.negadas.length} negadas/canceladas na maquininha (não entram nos totais).</p>` : ''}
   <h2 style="margin-top:12px">Por forma e bandeira (baixa do contas a receber)</h2>
   <p class="muted small">Baixe cada linha no contas a receber do Tiny pelo bruto, com a taxa como despesa: o líquido é o que cai na conta.</p>
@@ -892,7 +931,7 @@ function renderSheet() {
   if (!el) { el = document.createElement('div'); el.id = 'sheet'; el.className = 'scrim'; document.body.appendChild(el); }
   const k = S.sheet.k; let h = '';
   if (k === 'modelo') h = shModelo(); if (k === 'cart') h = shCart(); if (k === 'pagar') h = shPagar(); if (k === 'show') h = shShow();
-  if (k === 'mov') h = shMov(); if (k === 'texto') h = shTexto(); if (k === 'cargaPrev') h = shCargaPrev(); if (k === 'ajuste') h = shAjuste(); if (k === 'despesa') h = shDespesa(); if (k === 'reimport') h = shReimport();
+  if (k === 'mov') h = shMov(); if (k === 'texto') h = shTexto(); if (k === 'cargaPrev') h = shCargaPrev(); if (k === 'ajuste') h = shAjuste(); if (k === 'despesa') h = shDespesa(); if (k === 'reimport') h = shReimport(); if (k === 'perfil') h = shPerfil();
   el.innerHTML = `<div class="sheet" role="dialog"><div class="grab"></div>${h}</div>`;
 }
 function shModelo() {
@@ -947,6 +986,13 @@ function shShow() {
     <label class="f">Cidade<input class="i" name="cidade" required></label>
     <div class="grid2"><label class="f">UF<select class="i" name="uf" required><option value="">--</option>${UFS.map(u => `<option ${at && at.uf === u ? 'selected' : ''}>${u}</option>`).join('')}</select></label><label class="f">Data<input class="i" type="date" name="data" value="${dataNoite()}" required></label></div>
     <label class="f">Evento / local<input class="i" name="evento"></label><button class="btn primary block">Adicionar e usar</button></form>` : ''}`;
+}
+function shPerfil() {
+  const se = sessao();
+  return `<div class="row"><h3 class="grow">${se ? 'Vendendo como ' + esc(se.nome) : 'Perfil'}</h3><button class="iconbtn" data-a="fechar">✕</button></div>
+  <button class="btn primary block" style="margin-bottom:8px" data-a="trocarVendedor">Trocar vendedor</button>
+  ${se ? '<button class="btn block" style="margin-bottom:8px" data-a="sairVendedor">Sair (encerrar minha sessão)</button>' : ''}
+  ${S.cfg.pinHash ? '<button class="btn block" data-a="entrarGestor">Entrar como gestor</button>' : ''}`;
 }
 function shReimport() {
   return `<div class="row"><h3 class="grow">Reimportar carga</h3><button class="iconbtn" data-a="cancelarReimport">✕</button></div>
@@ -1076,16 +1122,19 @@ const A = {
   rmPag: e => { S.pagamentos.splice(+e.dataset.i, 1); renderSheet(); },
   dividir: async () => { const v = await perguntar({ titulo: 'Quanto vai na 1ª forma?', tipo: 'num', ok: 'OK' }); S.sheet = { k: 'pagar', parcial: v ? num(v) : null }; renderSheet(); },
   finalizar: async () => {
-    const l = lote(); const sh = showAtual(l); S.cfg.seqVenda = (S.cfg.seqVenda || 0) + 1; l.seq = S.cfg.seqVenda; saveCfg();
-    const v = { id: uid(), num: l.seq, loteId: l.id, showId: sh?.id, ts: now(), itens: S.cart.map(c => ({ sku: c.sku, qtd: c.qtd, preco: c.preco, ...(c.semSaldo ? { semSaldo: c.semSaldo } : {}) })),
+    if (temEquipe() && !gestor() && !sessao()) { toast('Entre com o seu PIN para vender', null, true); render(); return; }
+    const l = lote(); const sh = showAtual(l); const cx = codCaixa();
+    // número sequencial por caixa dentro do lote (C1-1, C1-2…): cada celular numera o seu, sem repetir entre caixas
+    const num = 1 + Math.max(0, ...S.vendas.filter(x => x.loteId === l.id && x.cx === cx).map(x => x.num || 0));
+    const v = { id: uid(), num, cx, loteId: l.id, showId: sh?.id, ts: now(), itens: S.cart.map(c => ({ sku: c.sku, qtd: c.qtd, preco: c.preco, ...(c.semSaldo ? { semSaldo: c.semSaldo } : {}) })),
       desconto: S.cartDesc, descMotivo: S.cartDesc ? S.cartDescMotivo : '', pagamentos: S.pagamentos.map(p => ({ forma: p.forma, valor: p.valor, ...(p.parcelas ? { parcelas: p.parcelas } : {}), ...(p.nome ? { nome: p.nome } : {}) })),
-      troco: S.pagamentos.reduce((a, p) => a + (p.troco || 0), 0), vendedor: S.cfg.vendedor, caixa: S.cfg.caixa, aparelho: S.cfg.aparelho, status: 'ok' };
+      troco: S.pagamentos.reduce((a, p) => a + (p.troco || 0), 0), vendedor: nomeVendedor(), vendedorId: sessao()?.id || '', caixa: S.cfg.caixa, aparelho: S.cfg.aparelho, status: 'ok' };
     S.vendas.push(v); await DB.put('vendas', v);
     const bk = { cart: S.cart, d: S.cartDesc };
     S.cart = []; S.cartDesc = 0; S.pagamentos = []; S.sheet = null; vibrate([20, 40, 20]); render();
-    toast(`Venda #${v.num} registrada · ${brl(totalVenda(v).liq)}`, async () => { v.status = 'cancelada'; v.motivoCanc = 'desfeita logo após o registro'; v.canceladaEm = now(); await DB.put('vendas', v); S.cart = bk.cart; S.cartDesc = bk.d; render(); });
+    toast(`Venda ${numVenda(v)} registrada · ${brl(totalVenda(v).liq)}`, async () => { v.status = 'cancelada'; v.motivoCanc = 'desfeita logo após o registro'; v.canceladaEm = now(); await DB.put('vendas', v); S.cart = bk.cart; S.cartDesc = bk.d; render(); });
   },
-  cancelarVenda: async e => { const v = S.vendas.find(x => x.id === e.dataset.id); const m = await perguntar({ titulo: `Cancelar venda #${v.num}?`, texto: 'A venda fica no histórico como cancelada e as peças voltam ao saldo. Estorne na maquininha se foi cartão ou Pix.', ph: 'motivo (obrigatório)', obrig: true, ok: 'Cancelar venda', perigo: true, chips: ['Lançada errada', 'Cliente desistiu', 'Pagamento recusado'] }); S.sheet = null; if (!m) return render(); v.status = 'cancelada'; v.motivoCanc = m; v.canceladaEm = now(); v.canceladaPor = S.cfg.vendedor; await DB.put('vendas', v); render(); toast('Venda cancelada'); },
+  cancelarVenda: async e => { const v = S.vendas.find(x => x.id === e.dataset.id); const m = await perguntar({ titulo: `Cancelar venda ${numVenda(v)}?`, texto: 'A venda fica no histórico como cancelada e as peças voltam ao saldo. Estorne na maquininha se foi cartão ou Pix.', ph: 'motivo (obrigatório)', obrig: true, ok: 'Cancelar venda', perigo: true, chips: ['Lançada errada', 'Cliente desistiu', 'Pagamento recusado'] }); S.sheet = null; if (!m) return render(); v.status = 'cancelada'; v.motivoCanc = m; v.canceladaEm = now(); v.canceladaPor = nomeVendedor(); await DB.put('vendas', v); render(); toast('Venda cancelada'); },
   sheetShow: () => { S.sheet = { k: 'show' }; renderSheet(); },
   usarShow: async e => { const l = lote(); l.showAtual = e.dataset.id; await saveLote(l); S.sheet = null; render(); toast('Show atual trocado'); },
   novoMov: e => { S.sheet = { k: 'mov', tipo: e.dataset.t }; renderSheet(); },
@@ -1098,8 +1147,13 @@ const A = {
   ret: async e => { const l = lote(); if (l.status === 'aberto') { toast('Primeiro toque em "Travar vendas"', null, true); return; } l.retorno ||= {}; const s = e.dataset.s; l.retorno[s] = Math.max(0, (l.retorno[s] || 0) + +e.dataset.d); await saveLote(l); const inp = document.querySelector(`input[data-in=ret][data-s="${CSS.escape(s)}"]`); if (inp) inp.value = l.retorno[s]; vibrate(10); },
   revelar: () => { const l = lote(); if (l.status === 'aberto') { toast('Primeiro toque em "Travar vendas"', null, true); return; } S.contagemRevelada = true; render(); window.scrollTo(0, 0); },
   recontar: () => { S.contagemRevelada = false; render(); },
-  perfil: () => { if (S.cfg.pinHash && gestor()) { Perfil.ate = 0; S.view = S.view === 'lote' ? 'lote' : 'home'; if (!ABAS_VENDEDOR.includes(S.tab)) S.tab = 'vender'; render(); toast('Modo vendedor'); } else entrarGestor(); },
-  corrigirData: async e => { const l = lote(); const sh = showAtual(l); (l.historico ||= []).push({ ts: now(), acao: 'data do show corrigida', motivo: `${sh.cidade}: ${fmtD(sh.data)} → ${fmtD(e.dataset.d)}`, quem: S.cfg.vendedor });
+  entrarVendedor: () => entrarVendedor(),
+  entrarGestor: () => entrarGestor(),
+  trocarVendedor: async () => { if (!temEquipe()) { toast('Cadastre a equipe em ⚙ (gestor)', null, true); return; } if (S.cart.length && !(await perguntar({ titulo: 'Trocar de vendedor?', texto: 'O carrinho atual será esvaziado.', ok: 'Trocar', semInput: true }))) { S.sheet = null; return render(); } S.sheet = null; S.cfg.sessao = null; await saveCfg(); S.cart = []; S.cartDesc = 0; S.pagamentos = []; render(); entrarVendedor(); },
+  sairVendedor: async () => { S.cfg.sessao = null; await saveCfg(); S.sheet = null; S.cart = []; render(); toast('Sessão encerrada'); },
+  perfil: () => { if (temEquipe() && !(S.cfg.pinHash && gestor())) { S.sheet = { k: 'perfil' }; renderSheet(); return; }
+    if (S.cfg.pinHash && gestor()) { Perfil.ate = 0; S.view = S.view === 'lote' ? 'lote' : 'home'; if (!ABAS_VENDEDOR.includes(S.tab)) S.tab = 'vender'; render(); toast('Modo vendedor'); } else entrarGestor(); },
+  corrigirData: async e => { const l = lote(); const sh = showAtual(l); (l.historico ||= []).push({ ts: now(), acao: 'data do show corrigida', motivo: `${sh.cidade}: ${fmtD(sh.data)} → ${fmtD(e.dataset.d)}`, quem: nomeVendedor() });
     sh.data = e.dataset.d; await saveLote(l); render(); toast('Data do show corrigida'); },
   dataCerta: async e => { const l = lote(); showAtual(l).dataConferida = e.dataset.d; await saveLote(l); render(); },
   addOutro: async () => { const l = lote(); fin(l).f.outros.push({ nome: '', valor: 0 }); await saveLote(l); render(); },
@@ -1114,12 +1168,12 @@ const A = {
     const quem = await perguntar({ titulo: 'Concluir a conferência financeira?', texto: `Venda no pedido do Tiny: ${brl(F.vendaAjustada)}. Recebido: ${brl(F.realTotal)}.`, ph: 'nome de quem conferiu', obrig: true, ok: 'Concluir' });
     S.sheet = null; if (!quem) return render(); F.f.concluido = true; F.f.concluidoEm = now(); F.f.concluidoPor = quem; await saveLote(l); render(); toast('Conferência financeira concluída'); },
   reabrirFin: async () => { const l = lote(); const m = await perguntar({ titulo: 'Reabrir a conferência?', ph: 'motivo', obrig: true, ok: 'Reabrir', perigo: true }); S.sheet = null; if (!m) return render();
-    (l.historico ||= []).push({ ts: now(), acao: 'conferência financeira reaberta', motivo: m, quem: S.cfg.vendedor }); fin(l).f.concluido = false; await saveLote(l); render(); },
+    (l.historico ||= []).push({ ts: now(), acao: 'conferência financeira reaberta', motivo: m, quem: nomeVendedor() }); fin(l).f.concluido = false; await saveLote(l); render(); },
   destravar: async () => { const l = lote(); if (l.status !== 'contagem') return;
     const n = Object.keys(l.retorno || {}).length;
     const m = await perguntar({ titulo: 'Destravar as vendas?', texto: `O lote volta a aceitar vendas e a contagem é zerada${n ? ` (${n} SKUs já contados serão apagados)` : ''}. Use se travou por engano ou se ainda vai vender.`, ph: 'motivo (obrigatório)', obrig: true, ok: 'Destravar e zerar', perigo: true, chips: ['Travou por engano', 'Ainda vai vender', 'Recomeçar a contagem'] });
     S.sheet = null; if (!m) return render();
-    (l.historico ||= []).push({ ts: now(), acao: 'destravou vendas', motivo: m, quem: S.cfg.vendedor, contadosApagados: n });
+    (l.historico ||= []).push({ ts: now(), acao: 'destravou vendas', motivo: m, quem: nomeVendedor(), contadosApagados: n });
     l.status = 'aberto'; l.retorno = {}; l.obsDif = {}; await saveLote(l);
     S.contagemRevelada = false; S.tab = 'vender'; render(); toast('Vendas destravadas e contagem zerada'); },
   obsChip: async e => { const l = lote(); l.obsDif ||= {}; const s = e.dataset.s; const atual = l.obsDif[s] || ''; l.obsDif[s] = atual && !atual.includes(e.dataset.v) ? atual + '; ' + e.dataset.v : e.dataset.v; await saveLote(l); render(); },
@@ -1137,12 +1191,20 @@ const A = {
   excluirLote: async () => { const l = lote(); const r = resumo(l);
     const m = await perguntar({ titulo: 'Excluir este lote?', texto: `${l.pedido ? 'Pedido ' + l.pedido : 'Lote sem pedido'} · ${r.n} vendas (${brl(r.liq)}). Ele sai da lista em todos os celulares. Vendas e bonificações ficam guardadas e o gestor pode restaurar o lote na tela inicial.`, ph: 'motivo (obrigatório)', obrig: true, ok: 'Excluir lote', perigo: true, chips: ['Lote criado por engano', 'Lote duplicado', 'Teste'] });
     S.sheet = null; if (!m) return render();
-    l.excluido = { ts: now(), quem: S.cfg.vendedor, motivo: m }; (l.historico ||= []).push({ ts: now(), acao: 'lote excluído', motivo: m, quem: S.cfg.vendedor });
+    l.excluido = { ts: now(), quem: nomeVendedor(), motivo: m }; (l.historico ||= []).push({ ts: now(), acao: 'lote excluído', motivo: m, quem: nomeVendedor() });
     await saveLote(l); S.loteId = null; S.view = 'home'; render(); toast('Lote excluído'); },
   restaurarLote: async e => { const l = S.lotes.find(x => x.id === e.dataset.id); if (!l) return;
-    (l.historico ||= []).push({ ts: now(), acao: 'lote restaurado', motivo: l.excluido?.motivo || '', quem: S.cfg.vendedor }); delete l.excluido;
+    (l.historico ||= []).push({ ts: now(), acao: 'lote restaurado', motivo: l.excluido?.motivo || '', quem: nomeVendedor() }); delete l.excluido;
     await saveLote(l); render(); toast('Lote restaurado'); },
   verExcluidos: () => { S.verExcluidos = !S.verExcluidos; render(); },
+  addVend: async () => {
+    if (!S.cfg.pinHash) { toast('Defina antes o PIN do gestor (acima): sem ele, qualquer pessoa entra como gestor e vê todas as vendas', null, true); return; }
+    const nome = String(await perguntar({ titulo: 'Cadastrar vendedor', ph: 'nome (como vai aparecer nas vendas)', obrig: true, ok: 'Próximo' }) || '').trim(); S.sheet = null; if (!nome) return render();
+    if ((S.equipe || []).some(p => p.nome.toLowerCase() === nome.toLowerCase())) { render(); toast('Já existe alguém com esse nome', null, true); return; }
+    const p = { id: uid(), nome, ativo: true }; if (!(await definirPinVend(p))) return render();
+    (S.equipe ||= []).push(p); await salvarEquipe(); render(); toast(`${nome} cadastrado`); },
+  pinVend: async e => { const p = S.equipe.find(x => x.id === e.dataset.id); if (p && await definirPinVend(p)) { await salvarEquipe(); render(); toast('PIN trocado'); } else render(); },
+  ativoVend: async e => { const p = S.equipe.find(x => x.id === e.dataset.id); if (!p) return; p.ativo = p.ativo === false; await salvarEquipe(); render(); },
   usarCarga: async () => { const st = S.sheet; const l = lote(); if (st.pedido && (!l.pedido || S.reimport)) l.pedido = st.pedido; await aplicarCarga(l, st.carga, st.nome); S.sheet = null; render(); toast(`Carga: ${Object.values(st.carga).reduce((a, b) => a + b, 0)} peças em ${Object.keys(st.carga).length} SKUs`); },
   fecharLote: async () => { const l = lote(); const sd = saldos(l); const ret = l.retorno || {};
     const semObs = Object.keys(sd).filter(s => (sd[s].carga || sd[s].vendido || sd[s].mov) && (ret[s] ?? 0) - sd[s].saldo !== 0 && !((l.obsDif || {})[s] || '').trim());
@@ -1160,17 +1222,26 @@ const A = {
   sincAgora: async () => { toast('Sincronizando…'); await Sinc.ciclo(true); toast(Sinc.erro ? 'Erro: ' + Sinc.erro : `Sincronizado · ${Sinc.nPend()} pendentes`, null, !!Sinc.erro); if (S.view === 'config') render(); },
   enviarConfig: () => { const abertos = S.lotes.filter(l => l.status !== 'fechado' && !l.excluido); const ids = new Set(abertos.map(l => l.id));
     const pac = { tipo: 'pacote', versao: 1, em: now(), de: S.cfg.caixa, produtos: [...S.produtos.values()].map(({ _rot, ...p }) => p), tabela: S.tabela, tabelaInfo: S.tabelaInfo,
-      custos: S.custos, custosInfo: S.custosInfo, cfg: { cfopBonif: S.cfg.cfopBonif, cfopPerda: S.cfg.cfopPerda, taxas: S.cfg.taxas, das: S.cfg.das, dasRef: S.cfg.dasRef, comissaoPct: S.cfg.comissaoPct, pinHash: S.cfg.pinHash || '', sincUrl: S.cfg.sincUrl || '', sincChave: S.cfg.sincChave || '' },
+      custos: S.custos, custosInfo: S.custosInfo, equipe: S.equipe, equipeEm: S.equipeEm, cfg: { cfopBonif: S.cfg.cfopBonif, cfopPerda: S.cfg.cfopPerda, taxas: S.cfg.taxas, das: S.cfg.das, dasRef: S.cfg.dasRef, comissaoPct: S.cfg.comissaoPct, pinHash: S.cfg.pinHash || '', sincUrl: S.cfg.sincUrl || '', sincChave: S.cfg.sincChave || '' },
       lotes: abertos, vendas: S.vendas.filter(v => ids.has(v.loteId)), movs: S.movs.filter(m => ids.has(m.loteId)) };
     baixar(`pdv-shows-configuracao-${today()}.json`, JSON.stringify(pac), 'application/json'); },
   backupTudo: () => baixar(`pdv-shows-backup-${today()}.json`, JSON.stringify({ tipo: 'backup', versao: 1, em: now(), produtos: [...S.produtos.values()], lotes: S.lotes, vendas: S.vendas, movs: S.movs }), 'application/json'),
 };
 
+async function definirPinVend(p) {
+  const pin = String(await perguntar({ titulo: `PIN de ${p.nome}`, texto: '4 a 8 números. A própria pessoa pode digitar.', tipo: 'pin', ph: 'novo PIN', obrig: true, ok: 'Próximo' }) || '').trim(); S.sheet = null;
+  if (!pin) return false;
+  if (!/^\d{4,8}$/.test(pin)) { toast('PIN: 4 a 8 números', null, true); return false; }
+  const conf = String(await perguntar({ titulo: 'Repita o PIN', tipo: 'pin', ph: 'mesmo PIN', obrig: true, ok: 'Salvar' }) || '').trim(); S.sheet = null;
+  if (conf !== pin) { toast('Os PINs não batem', null, true); return false; }
+  if (S.cfg.pinHash && await hashPin(pin) === S.cfg.pinHash) { toast('Use um PIN diferente do PIN do gestor', null, true); return false; }
+  p.pinHash = await pinVendedor(p.id, pin); p.pinEm = now(); return true;
+}
 // movimento de carga manual reaproveita o sheet de movimentos
 async function salvarMov(fd) {
   const l = lote(); const st = S.sheet; const qtd = Math.max(1, Math.round(num(fd.get('qtd'))));
   if (st.tipo === '__carga') { l.carga[st.sku] = (l.carga[st.sku] || 0) + qtd; await saveLote(l); S.sheet = { k: 'mov', tipo: '__carga' }; render(); toast(`Carga: +${qtd} ${st.sku}`); return; }
-  const m = { id: uid(), loteId: l.id, showId: showAtual(l)?.id, ts: now(), tipo: st.tipo, sku: st.sku, qtd, autorizou: fd.get('autorizou') || '', obs: fd.get('obs') || '', quem: S.cfg.vendedor, caixa: S.cfg.caixa, status: 'ok' };
+  const m = { id: uid(), loteId: l.id, showId: showAtual(l)?.id, ts: now(), tipo: st.tipo, sku: st.sku, qtd, autorizou: fd.get('autorizou') || '', obs: fd.get('obs') || '', quem: nomeVendedor(), vendedorId: sessao()?.id || '', caixa: S.cfg.caixa, status: 'ok' };
   S.movs.push(m); await DB.put('movs', m); S.sheet = null; vibrate(15); render();
   toast(`${MOV[m.tipo]}: ${qtd}× ${m.sku}`, async () => { m.status = 'cancelada'; m.motivoCanc = 'desfeito'; await DB.put('movs', m); render(); });
 }
@@ -1179,14 +1250,14 @@ async function salvarMov(fd) {
 document.addEventListener('submit', async ev => {
   const f = ev.target; const k = f.dataset.f; if (!k) return; ev.preventDefault(); const fd = new FormData(f);
   if (k === 'texto') { const r = S.sheet.res; const v = fd.get('v'); S.sheet = null; r && r(v); return; }
-  if (k === 'cfg' && !fd.has('cfopBonif')) { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); await saveCfg(); S.view = 'home'; render(); toast('Salvo'); return; }
+  if (k === 'cfg' && !fd.has('cfopBonif')) { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.caixaCod = (fd.get('caixaCod') || '').trim().toUpperCase(); S.cfg.tema = fd.get('tema'); await saveCfg(); S.view = 'home'; render(); toast('Salvo'); return; }
   if (k === 'cfg') { const pn = (fd.get('pinNovo') || '').trim();
     if (pn) { if (!/^\d{4,8}$/.test(pn) || pn !== (fd.get('pinConf') || '').trim()) { toast('PIN: 4 a 8 números, iguais nos dois campos', null, true); return; } S.cfg.pinHash = await hashPin(pn); Perfil.ate = Date.now() + 15 * 60e3; }
-    S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); if (num(fd.get('das')) !== S.cfg.das) S.cfg.dasRef = `informado em ${fmtDT(now())} por ${S.cfg.vendedor || '—'}`; S.cfg.das = num(fd.get('das')); S.cfg.comissaoPct = num(fd.get('comissaoPct')); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
+    S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.caixaCod = (fd.get('caixaCod') || '').trim().toUpperCase(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); if (num(fd.get('das')) !== S.cfg.das) S.cfg.dasRef = `informado em ${fmtDT(now())} por ${S.cfg.vendedor || '—'}`; S.cfg.das = num(fd.get('das')); S.cfg.comissaoPct = num(fd.get('comissaoPct')); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
     const urlAntes = S.cfg.sincUrl; S.cfg.sincUrl = (fd.get('sincUrl') || '').trim(); S.cfg.sincChave = (fd.get('sincChave') || '').trim(); await saveCfg();
     if (Sinc.ativo() && S.cfg.sincUrl !== urlAntes) { // servidor novo: sobe tudo o que existe neste aparelho
       S.lotes.forEach(l => Sinc.st.pend['lote:' + l.id] = ++Sinc.cont); S.vendas.forEach(v => Sinc.st.pend['venda:' + v.id] = ++Sinc.cont); S.movs.forEach(m => Sinc.st.pend['mov:' + m.id] = ++Sinc.cont);
-      if (Object.keys(S.tabela).length) Sinc.st.pend['tabela:atual'] = ++Sinc.cont; if (S.produtos.size) { Sinc.st.pend['catalogo:atual'] = ++Sinc.cont; Sinc.st.catVer ||= now(); }
+      if (Object.keys(S.tabela).length) Sinc.st.pend['tabela:atual'] = ++Sinc.cont; if ((S.equipe || []).length) Sinc.st.pend['equipe:atual'] = ++Sinc.cont; if (S.produtos.size) { Sinc.st.pend['catalogo:atual'] = ++Sinc.cont; Sinc.st.catVer ||= now(); }
       Sinc.st.seq = 0; Sinc.salvar(); }
     Sinc.ciclo(); S.view = 'home'; render(); toast('Salvo'); }
   if (k === 'novoLote') {
@@ -1198,9 +1269,9 @@ document.addEventListener('submit', async ev => {
   }
   if (k === 'novoShow') { const l = lote(); const sh = { id: uid(), cidade: fd.get('cidade').trim(), uf: fd.get('uf'), data: fd.get('data'), evento: fd.get('evento').trim() }; l.shows.push(sh); l.showAtual = sh.id; await saveLote(l); S.sheet = null; render(); toast(`Agora vendendo em ${sh.cidade}/${sh.uf}`); }
   if (k === 'mov') salvarMov(fd);
-  if (k === 'despesa') { const l = lote(); const d = { id: uid(), cat: fd.get('cat'), showId: fd.get('showId') || '', tipo: fd.get('tipo'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: S.cfg.vendedor, ts: now() };
+  if (k === 'despesa') { const l = lote(); const d = { id: uid(), cat: fd.get('cat'), showId: fd.get('showId') || '', tipo: fd.get('tipo'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: nomeVendedor(), ts: now() };
     if (!d.valor) { toast('Informe o valor', null, true); return; } (l.despesas ||= []).push(d); await saveLote(l); S.sheet = null; render(); toast('Despesa lançada'); }
-  if (k === 'ajuste') { const l = lote(); const cat = CAT_AJ[fd.get('cat')]; const a = { id: uid(), cat: cat.id, dir: cat.neutro ? 'mais' : fd.get('dir'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: S.cfg.vendedor, ts: now() };
+  if (k === 'ajuste') { const l = lote(); const cat = CAT_AJ[fd.get('cat')]; const a = { id: uid(), cat: cat.id, dir: cat.neutro ? 'mais' : fd.get('dir'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: nomeVendedor(), ts: now() };
     if (cat.sku && fd.get('sku')) { a.sku = fd.get('sku'); a.qtd = Math.max(1, Math.round(num(fd.get('qtd')))); }
     if (fd.get('txId')) a.txId = fd.get('txId');
     if (!a.valor) { toast('Informe o valor', null, true); return; }
@@ -1298,7 +1369,7 @@ function analiseInfinite(l) {
     const s = (l.shows || []).filter(s => s.data && s.data <= dia && (+new Date(dia) - +new Date(s.data)) <= 864e5).sort((a, b) => b.data.localeCompare(a.data))[0];
     return s ? `${s.cidade}/${s.uf}` : `fora dos shows (${fmtD(dia)})`; };
   // conciliação: cada pagamento do PDV (exceto dinheiro) com a transação de mesma forma e valor mais próxima no tempo (até 30 min)
-  const pags = []; vendasLote(l).forEach(v => v.pagamentos.filter(p => !FORA_INFINITE.includes(p.forma)).forEach(p => pags.push({ num: v.num, t: +new Date(v.ts), forma: p.forma, valor: p.valor, parcelas: p.parcelas || 1 })));
+  const pags = []; vendasLote(l).forEach(v => v.pagamentos.filter(p => !FORA_INFINITE.includes(p.forma)).forEach(p => pags.push({ num: v.num, cx: v.cx, t: +new Date(v.ts), forma: p.forma, valor: p.valor, parcelas: p.parcelas || 1 })));
   const livre = ap.map(x => ({ ...x, tt: +new Date(x.t), usado: false })); const semTx = [];
   pags.sort((a, b) => a.t - b.t).forEach(p => {
     let best = null; livre.forEach(x => { if (x.usado || x.forma !== p.forma || Math.abs(x.valor - p.valor) > 0.01) return; const d = Math.abs(x.tt - p.t); if (d <= 30 * 60e3 && (!best || d < Math.abs(best.tt - p.t))) best = x; });
@@ -1373,6 +1444,7 @@ async function receberCaixa(file) {
       if (pac.produtos?.length) { pac.produtos.forEach(p => S.produtos.set(p.sku, p)); await DB.bulk('produtos', pac.produtos, true); }
       if (pac.tabela && Object.keys(pac.tabela).length) { S.tabela = pac.tabela; S.tabelaInfo = pac.tabelaInfo || { em: pac.em, arq: 'configuração' }; await DB.put('meta', { k: 'tabela', v: S.tabela, em: S.tabelaInfo.em, arq: S.tabelaInfo.arq }, true); }
       if (pac.custos && Object.keys(pac.custos).length) { S.custos = pac.custos; S.custosInfo = pac.custosInfo || { em: pac.em, arq: 'configuração' }; await DB.put('meta', { k: 'custos', v: S.custos, em: S.custosInfo.em, arq: S.custosInfo.arq }, true); }
+      if (pac.equipe && (!S.equipeEm || pac.equipeEm > S.equipeEm)) { S.equipe = pac.equipe; S.equipeEm = pac.equipeEm || pac.em; await DB.put('meta', { k: 'equipe', v: S.equipe, em: S.equipeEm }, true); }
       if (pac.cfg) { S.cfg = { ...S.cfg, ...pac.cfg, taxas: { ...S.cfg.taxas, ...(pac.cfg.taxas || {}) } }; await saveCfg(); }
     } else for (const p of pac.produtos || []) if (!S.produtos.has(p.sku)) { S.produtos.set(p.sku, p); await DB.put('produtos', p); }
     for (const l of lotes) { const meu = S.lotes.find(x => x.id === l.id);
@@ -1395,7 +1467,7 @@ function relatorioHTML(l) {
     return { s, p: S.produtos.get(s) || { descricao: s }, ...x, ret: ret[s], dif, perda: dif < 0 ? -dif : 0, sobra: dif > 0 ? dif : 0 };
   }).sort((a, b) => (a.dif || 0) - (b.dif || 0) || (b.vendido + b.mov) - (a.vendido + a.mov) || a.s.localeCompare(b.s)); // divergências e movimentados primeiro
   const movs = movsLote(l); const inf = l.conferenciaInfinite; const F = fin(l); const M = margem(l); const a = analiseInfinite(l);
-  const semSaldo = vendasLote(l).flatMap(v => v.itens.filter(i => i.semSaldo).map(i => ({ ...i, num: v.num, motivo: i.semSaldo })));
+  const semSaldo = vendasLote(l).flatMap(v => v.itens.filter(i => i.semSaldo).map(i => ({ ...i, num: v.num, cx: v.cx, motivo: i.semSaldo })));
   const descs = vendasLote(l).filter(v => v.desconto);
   const soma = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
   const custo = x => custoDe(x.s);
@@ -1452,11 +1524,20 @@ function relatorioHTML(l) {
 
   <h2>Faturamento e resultado por show</h2>${cards.join('')}
   <p class="foot">Receita conferida (PDV + ajustes da conferência financeira que mudam a venda). DAS sobre a receita · taxas ${M.taxaReal ? 'reais do extrato InfinitePay' : 'estimadas'} · CMV, bonificações e perdas pelo custo oficial${M.semCusto.length ? ` (<span class="neg">${M.semCusto.length} SKUs sem custo: CMV subestimado</span>)` : ''} · despesas do lote rateadas pela receita · quebra de caixa não muda a venda nem o DAS, mas sai do resultado.${M.conf ? '' : ' <span class="neg">Prévia: conferência financeira não concluída.</span>'}</p>
+  ${(() => { const vs = vendasLote(l); if (!vs.length) return ''; const g = {};
+    vs.forEach(v => { const k = v.vendedor || '—'; const x = g[k] ||= { n: 0, pecas: 0, liq: 0, desc: 0, cx: new Set() }; const t = totalVenda(v);
+      x.n++; x.liq += t.liq; x.desc += v.desconto || 0; v.itens.forEach(i => x.pecas += i.qtd); x.cx.add(v.cx ? `${v.cx}${v.caixa ? ' · ' + v.caixa : ''}` : (v.caixa || '—')); });
+    const bon = {}; movs.forEach(m => bon[m.quem || '—'] = (bon[m.quem || '—'] || 0) + m.qtd);
+    const ks = Object.entries(g).sort((a, b) => b[1].liq - a[1].liq);
+    return `<h2>Vendas por vendedor</h2><table><thead><tr><th class="l">Vendedor</th><th class="l">Caixa</th><th>Vendas</th><th>Peças</th><th>Faturamento (PDV)</th><th>% do lote</th><th>Ticket</th><th>Descontos</th><th>Bonif. lançadas</th></tr></thead><tbody>
+    ${ks.map(([k, x]) => `<tr><td class="l"><b>${esc(k)}</b></td><td class="l">${[...x.cx].map(esc).join('; ')}</td><td>${x.n}</td><td>${x.pecas}</td><td><b>${brl(x.liq)}</b></td><td>${pct(x.liq, r.liq)}</td><td>${brl(x.liq / x.n)}</td><td>${brl(x.desc)}</td><td>${bon[k] || 0}</td></tr>`).join('')}
+    <tr><th class="l" colspan="2">Total</th><th>${r.n}</th><th>${r.pecas}</th><th>${brl(r.liq)}</th><th>100%</th><th>${brl(r.ticket)}</th><th>${brl(r.desc)}</th><th>${soma(movs, m => m.qtd)}</th></tr></tbody></table>
+    <p class="foot">Faturamento lançado no PDV por quem registrou a venda (base da comissão). Ajustes da conferência financeira não são atribuídos a vendedor.</p>`; })()}
   ${(l.despesas || []).length ? `<h2>Despesas do show</h2><table><thead><tr><th class="l">Despesa</th><th class="l">Show</th><th class="l">Obs.</th><th class="l">Lançou</th><th>Valor</th></tr></thead><tbody>${l.despesas.map(d => `<tr><td class="l">${esc(d.cat)}</td><td class="l">${d.showId ? esc(showsPorId[d.showId]?.cidade || '') : 'Todo o lote'}</td><td class="l">${esc(d.obs || '')}</td><td class="l">${esc(d.quem || '')}</td><td>${d.tipo === 'pct' ? String(d.valor).replace('.', ',') + '% da venda' : brl(d.valor)}</td></tr>`).join('')}
     <tr><th class="l" colspan="4">Total</th><th>${brl(M.tot.desp)}</th></tr></tbody></table>` : ''}
   ${movs.length ? `<h2>Bonificações (CFOP ${esc(S.cfg.cfopBonif)})</h2><table><thead><tr><th class="l">Data</th><th class="l">Tipo</th><th class="l">SKU</th><th class="l">Descrição</th><th>Qtd</th><th>Custo</th><th class="l">Autorizou</th><th class="l">Lançou</th><th class="l">Obs.</th></tr></thead><tbody>
   ${movs.map(m => `<tr><td class="l">${fmtDT(m.ts)}</td><td class="l">${esc(MOV[m.tipo] || m.tipo)}</td><td class="l">${esc(m.sku)}</td><td class="l">${esc(S.produtos.get(m.sku)?.descricao || '')}</td><td>${m.qtd}</td><td>${brl(custoDe(m.sku) * m.qtd)}</td><td class="l">${esc(m.autorizou)}</td><td class="l">${esc(m.quem)}</td><td class="l">${esc(m.obs)}</td></tr>`).join('')}</tbody></table>` : ''}
-  ${descs.length || semSaldo.length ? `<h2>Descontos e exceções</h2><table><tbody>${descs.map(v => `<tr><td class="l">Venda #${v.num}</td><td class="l">Desconto ${brl(v.desconto)} · ${esc(v.descMotivo)} · ${esc(v.vendedor)}</td></tr>`).join('')}${semSaldo.map(i => `<tr><td class="l">Venda #${i.num}</td><td class="l">${esc(i.sku)} vendido sem saldo na carga · ${esc(i.motivo)}</td></tr>`).join('')}
+  ${descs.length || semSaldo.length ? `<h2>Descontos e exceções</h2><table><tbody>${descs.map(v => `<tr><td class="l">Venda ${numVenda(v)}</td><td class="l">Desconto ${brl(v.desconto)} · ${esc(v.descMotivo)} · ${esc(v.vendedor)}</td></tr>`).join('')}${semSaldo.map(i => `<tr><td class="l">Venda ${numVenda(i)}</td><td class="l">${esc(i.sku)} vendido sem saldo na carga · ${esc(i.motivo)}</td></tr>`).join('')}
     ${descs.length ? `<tr><th class="l">Total de descontos</th><th class="l">${brl(soma(descs, v => v.desconto))} (${pct(soma(descs, v => v.desconto), r.bruto)} do bruto)</th></tr>` : ''}</tbody></table>` : ''}
 
   <div class="sec quebra">2 · Conciliação e baixas no ERP</div>
@@ -1488,7 +1569,7 @@ function relatorioHTML(l) {
   ${a ? `<h2>Conciliação venda a venda (PDV × InfinitePay)</h2>
     <p><b>${a.conciliadas} de ${a.pags}</b> pagamentos do PDV com transação de mesma forma e valor em até 30 minutos.${a.conciliadas < a.pags ? ' <span class="neg">Venda lançada no app muito depois de passar na maquininha não concilia: confira as listas abaixo.</span>' : ''}</p>
     ${a.semPdv.length ? `<table><thead><tr><th class="l" colspan="4">Transações sem venda no PDV (${a.semPdv.length} · ${brl(a.semPdv.reduce((s, t) => s + t.valor, 0))})</th></tr></thead><tbody>${a.semPdv.map(t => `<tr><td class="l">${fmtDT(t.t)}</td><td class="l">${FORMA[t.forma]}${t.forma !== 'pix' ? ' · ' + esc(titulo(t.band)) : ''}${t.parc > 1 ? ' ' + t.parc + 'x' : ''}</td><td class="l">${esc(t.term)}</td><td>${brl(t.valor)}</td></tr>`).join('')}</tbody></table>` : ''}
-    ${a.semTx.length ? `<p><b class="neg">Pagamentos do PDV sem transação (${a.semTx.length}):</b> ${a.semTx.map(p => `#${p.num} ${FORMA[p.forma]} ${brl(p.valor)}`).join(' · ')}</p>` : ''}
+    ${a.semTx.length ? `<p><b class="neg">Pagamentos do PDV sem transação (${a.semTx.length}):</b> ${a.semTx.map(p => `${numVenda(p)} ${FORMA[p.forma]} ${brl(p.valor)}`).join(' · ')}</p>` : ''}
     <table><thead><tr><th class="l">Origem (máquina / tap / Pix)</th><th>Qtd</th><th>Bruto</th><th>Taxa</th><th>Líquido</th></tr></thead><tbody>${Object.entries(a.porTerm).map(([k, x]) => `<tr><td class="l">${esc(k)}</td><td>${x.n}</td><td>${brl(x.valor)}</td><td>${brl(x.taxa)}</td><td>${brl(x.liq)}</td></tr>`).join('')}</tbody></table>` : ''}
 
   ${perdas.length || sobras.length ? `<h2>Divergências da contagem</h2><table><thead><tr><th class="l">SKU</th><th class="l">Descrição</th><th>Esperado</th><th>Contado</th><th>Diferença</th><th class="l">Observação</th></tr></thead><tbody>
@@ -1500,7 +1581,7 @@ function relatorioHTML(l) {
     <tr><th class="l" colspan="2">Total do lote (inclui o retorno integral abaixo)</th><th>${soma(linhas, x => x.carga)}</th><th>${soma(linhas, x => x.vendido)}</th><th></th><th>${brl(soma(linhas, x => x.valor))}</th><th>${soma(linhas, x => x.mov)}</th><th>${soma(linhas, x => x.perda)}</th><th>${soma(linhas, x => x.sobra)}</th><th>${soma(linhas, x => x.ret || 0)}</th></tr></tbody></table>
     ${so.length ? `<p class="small"><b>Retorno integral (sem venda, bonificação ou divergência): ${so.length} SKUs, ${soma(so, x => x.ret ?? x.carga)} peças.</b> ${so.map(x => `${esc(x.s)} (${x.ret ?? x.carga})`).join(' · ')}</p>` : ''}`; })()}
   <div class="sign"><div>Responsável pela venda</div><div>Conferente da contagem</div></div>
-  <p class="foot">Gerado pelo PDV Shows Indião · caixa ${esc(S.cfg.caixa)} · ${vendasLote(l, true).length} registros de venda, ${S.movs.filter(m => m.loteId === l.id).length} de bonificação.</p>`;
+  <p class="foot">PDF gerado em: ${esc(S.cfg.caixa || 'celular sem nome')} (${esc(codCaixa())}) por ${esc(nomeVendedor() || '—')} · caixas com vendas no lote: ${[...new Set(vendasLote(l, true).map(v => v.cx ? `${v.cx}${v.caixa ? ' · ' + v.caixa : ''}` : (v.caixa || '—')))].map(esc).join('; ') || '—'} · ${vendasLote(l, true).length} registros de venda, ${S.movs.filter(m => m.loteId === l.id).length} de bonificação.</p>`;
 }
 
 // ---------- fotos offline, persistência, tela ligada ----------
@@ -1529,6 +1610,7 @@ addEventListener('online', () => { render(); Sinc.ciclo(); }); addEventListener(
   ps.forEach(p => S.produtos.set(p.sku, p)); S.lotes = ls; S.vendas = vs; S.movs = ms;
   try { S.miniaturas = await (await fetch('fotos/indice.json')).json(); } catch (e) { S.miniaturas = { skus: {} }; }
   const cu = meta.find(m => m.k === 'custos'); if (cu) { S.custos = cu.v || {}; S.custosInfo = { em: cu.em, arq: cu.arq }; }
+  const eq = meta.find(m => m.k === 'equipe'); if (eq) { S.equipe = eq.v || []; S.equipeEm = eq.em; }
   const tb = meta.find(m => m.k === 'tabela'); if (tb) { S.tabela = tb.v || {}; S.tabelaInfo = { em: tb.em, arq: tb.arq }; }
   const cfg = meta.find(m => m.k === 'cfg'); if (cfg) S.cfg = { ...S.cfg, ...cfg.v, taxas: { ...S.cfg.taxas, ...(cfg.v.taxas || {}) } };
   if (!S.cfg.aparelho) { S.cfg.aparelho = uid(); saveCfg(); }
