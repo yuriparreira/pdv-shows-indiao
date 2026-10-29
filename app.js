@@ -480,6 +480,7 @@ function render() {
   const app = $('#app');
   const v = S.view;
   if (!gestor() && v === 'catalogo') S.view = 'home';
+  if (S.view === 'lote' && !gestor() && (lote()?.status === 'fechado' || lote()?.excluido)) { S.view = 'home'; S.loteId = null; }
   if (S.view === 'lote' && !gestor() && !ABAS_VENDEDOR.includes(S.tab)) S.tab = 'vender';
   if (!gestor() && temEquipe() && !sessao() && S.view !== 'config') { app.innerHTML = vLogin(); renderSheet(); return; }
   if (S.view === 'home') app.innerHTML = vHome();
@@ -502,7 +503,8 @@ function vLogin() {
   <button class="btn block" data-a="entrarGestor">Entrar como gestor</button></main>`;
 }
 function vHome() {
-  const lotes = S.lotes.filter(l => !l.excluido).sort((a, b) => (b.criado || '').localeCompare(a.criado || ''));
+  // vendedor não vê lote fechado (resultado e conferência são do gestor)
+  const lotes = S.lotes.filter(l => !l.excluido && (gestor() || l.status !== 'fechado')).sort((a, b) => (b.criado || '').localeCompare(a.criado || ''));
   const excluidos = S.lotes.filter(l => l.excluido);
   const semCfg = !S.cfg.vendedor;
   return topo(null, 'PDV Shows', false, `<button class="iconbtn" data-a="ir" data-v="config" aria-label="Configurações">⚙</button>`) + `<main>

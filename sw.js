@@ -1,5 +1,5 @@
 // Service worker: guarda o app para abrir sem internet e as fotos dos produtos.
-const APP = 'pdv-app-v27';
+const APP = 'pdv-app-v28';
 const FOTOS = 'cd777e3e02'; // versão das miniaturas (atualizada por fotos/gerar_miniaturas.py)
 const ARQ = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon.svg',
   'marca/logo-negativo.svg', 'marca/logo-positivo.svg', 'marca/JockeyOne-Regular.ttf', 'marca/FamiljenGrotesk-VariableFont_wght.ttf',
