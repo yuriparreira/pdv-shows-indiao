@@ -199,6 +199,8 @@ const sessao = () => { const x = S.cfg.sessao; return x && Date.now() - new Date
 const nomeVendedor = () => sessao()?.nome || S.cfg.vendedor;
 const minha = x => gestor() || !temEquipe() || (x.vendedorId ? x.vendedorId === sessao()?.id : (x.vendedor || x.quem) === sessao()?.nome);
 const codCaixa = () => (S.cfg.caixaCod || 'C' + (S.cfg.aparelho || 'X').slice(-3)).toUpperCase();
+const chaveVend = x => x.vendedorId || (S.equipe || []).find(p => p.nome.toLowerCase() === String(x.vendedor || x.quem || '').trim().toLowerCase())?.id || 'nome:' + (x.vendedor || x.quem || '—');
+const nomeVend = x => (S.equipe || []).find(p => p.id === chaveVend(x))?.nome || x.vendedor || x.quem || '—';
 const numVenda = v => v.cx ? `${v.cx}-${v.num}` : `#${v.num}`;
 const pinVendedor = (id, pin) => hashPin(id + ':' + pin);
 async function salvarEquipe() { S.equipeEm = now(); await DB.put('meta', { k: 'equipe', v: S.equipe, em: S.equipeEm }); }
@@ -510,12 +512,14 @@ function vLogin() {
 function shRetro() {
   const l = lote(); const r = S.retro || {}; const sh = (l.shows || []);
   const dataPadrao = r.ts ? toLocal(r.ts) : (showAtual(l)?.data || today()) + 'T22:00';
-  const nomes = [...new Set([...equipeAtiva().map(p => p.nome), ...String(l.equipe || '').split(/[,;/]/).map(x => x.trim()).filter(Boolean)])];
+  // com equipe cadastrada, só ela (chave única por vendedor); sem equipe, os nomes digitados no lote
+  const ops = temEquipe() ? equipeAtiva().filter(p => !(l.equipeIds || []).length || l.equipeIds.includes(p.id) || p.id === r.vendedorId).map(p => ({ v: p.id, n: p.nome }))
+    : [...new Set(String(l.equipe || '').split(/[,;/]/).map(x => x.trim()).filter(Boolean))].map(n => ({ v: 'nome:' + n, n }));
   return `<div class="row"><h3 class="grow">Venda esquecida</h3><button class="iconbtn" data-a="fechar">✕</button></div>
   <p class="muted small">Para a venda que o vendedor não lançou. Ela entra no nome dele, na data e no show certos, marcada como lançada por você. Vale até encerrar.</p>
   <form data-f="retro">
-  <label class="f">Vendedor<select class="i" name="nome" required>${nomes.map(n => `<option ${n === r.nome ? 'selected' : ''}>${esc(n)}</option>`).join('')}<option value="__outro">Outro…</option></select></label>
-  <label class="f">Outro nome (se não estiver na lista)<input class="i" name="outro" placeholder="nome do vendedor"></label>
+  <label class="f">Vendedor<select class="i" name="nome" required>${ops.map(o => `<option value="${esc(o.v)}" ${o.v === (r.vendedorId || 'nome:' + r.nome) ? 'selected' : ''}>${esc(o.n)}</option>`).join('')}${temEquipe() ? '' : '<option value="__outro">Outro…</option>'}</select></label>
+  ${temEquipe() ? '<p class="muted small">Vendedor fora da lista: cadastre em ⚙ › Equipe de vendas.</p>' : '<label class="f">Outro nome (se não estiver na lista)<input class="i" name="outro" placeholder="nome do vendedor"></label>'}
   <label class="f">Data e hora da venda<input class="i" type="datetime-local" name="ts" value="${dataPadrao}" max="${toLocal(now())}" required></label>
   <label class="f">Show<select class="i" name="showId">${sh.map(x => `<option value="${x.id}" ${x.id === (r.showId || showAtual(l)?.id) ? 'selected' : ''}>${esc(x.cidade)}/${x.uf} · ${fmtD(x.data)}</option>`).join('')}</select></label>
   <button class="btn primary block">Começar a lançar</button></form>`;
@@ -555,7 +559,8 @@ function vNovo() {
   return topo('Novo lote', 'Um lote = um pedido de retirada no Tiny', true) + `<main><form data-f="novoLote">
   <label class="f">Nº do pedido no Tiny (cliente "Shows e Eventos")<input class="i" name="pedido" inputmode="numeric" placeholder="ex.: 4821"></label>
   <label class="f">Responsável pela carga<input class="i" name="resp" value="${esc(S.cfg.vendedor)}" required></label>
-  <label class="f">Equipe de venda<input class="i" name="equipe" placeholder="ex.: nomes da equipe do show"></label>
+  ${temEquipe() ? `<div class="f">Equipe de venda<div class="chips" style="margin-top:6px">${equipeAtiva().map(p => `<label class="chip"><input type="checkbox" name="equipeIds" value="${p.id}" ${p.id === sessao()?.id ? 'checked' : ''}> ${esc(p.nome)}</label>`).join('')}</div></div>`
+    : `<label class="f">Equipe de venda<input class="i" name="equipe" placeholder="ex.: nomes da equipe do show"></label>`}
   <div id="shows">${blocoShow(1, dataNoite())}</div>
   <p class="muted small">A data do show é a da noite em que ele começou. Show que começa depois da meia-noite usa a data da véspera.</p>
   <button type="button" class="btn block" data-a="maisShow" style="margin-bottom:12px">+ Adicionar outro show deste lote</button>
@@ -1300,15 +1305,15 @@ document.addEventListener('submit', async ev => {
     if (!S.cfg.vendedor) { S.cfg.vendedor = fd.get('resp'); saveCfg(); }
     const cs = fd.getAll('cidade'), us = fd.getAll('uf'), ds = fd.getAll('data'), es = fd.getAll('evento');
     const shows = cs.map((c, i) => ({ id: uid(), cidade: c.trim(), uf: us[i], data: ds[i], evento: (es[i] || '').trim() })).sort((a, b) => a.data.localeCompare(b.data));
-    const l = { id: uid(), pedido: fd.get('pedido').trim(), resp: fd.get('resp').trim(), equipe: fd.get('equipe').trim(), shows, showAtual: shows[0].id, carga: {}, retorno: {}, obsDif: {}, status: 'aberto', criado: now(), seq: 0 };
+    const l = { id: uid(), pedido: fd.get('pedido').trim(), resp: fd.get('resp').trim(), equipeIds: fd.getAll('equipeIds'), equipe: fd.getAll('equipeIds').length ? fd.getAll('equipeIds').map(id => S.equipe.find(p => p.id === id)?.nome).filter(Boolean).join(', ') : (fd.get('equipe') || '').trim(), shows, showAtual: shows[0].id, carga: {}, retorno: {}, obsDif: {}, status: 'aberto', criado: now(), seq: 0 };
     S.lotes.push(l); await saveLote(l); S.loteId = l.id; S.view = 'lote'; S.tab = 'vender'; render();
   }
   if (k === 'novoShow') { const l = lote(); const sh = { id: uid(), cidade: fd.get('cidade').trim(), uf: fd.get('uf'), data: fd.get('data'), evento: fd.get('evento').trim() }; l.shows.push(sh); l.showAtual = sh.id; await saveLote(l); S.sheet = null; render(); toast(`Agora vendendo em ${sh.cidade}/${sh.uf}`); }
   if (k === 'mov') salvarMov(fd);
-  if (k === 'retro') { const l = lote(); let nome = fd.get('nome'); if (nome === '__outro' || (fd.get('outro') || '').trim()) nome = (fd.get('outro') || '').trim();
+  if (k === 'retro') { const l = lote(); const sel = fd.get('nome') || ''; const p = equipeAtiva().find(x => x.id === sel);
+    let nome = p ? p.nome : sel.startsWith('nome:') ? sel.slice(5) : ''; if (!p && (sel === '__outro' || (fd.get('outro') || '').trim())) nome = (fd.get('outro') || '').trim();
     if (!nome) { toast('Informe o vendedor', null, true); return; }
     const ts = new Date(fd.get('ts')); if (isNaN(ts) || ts > new Date()) { toast('A data precisa ser de hoje ou de antes', null, true); return; }
-    const p = equipeAtiva().find(x => x.nome === nome);
     S.retro = { loteId: l.id, nome, vendedorId: p?.id || '', ts: ts.toISOString(), showId: fd.get('showId') };
     S.cart = []; S.cartDesc = 0; S.pagamentos = []; S.sheet = null; S.tab = 'vender'; render(); toast(`Lançando em nome de ${nome}`); }
   if (k === 'despesa') { const l = lote(); const d = { id: uid(), cat: fd.get('cat'), showId: fd.get('showId') || '', tipo: fd.get('tipo'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: nomeVendedor(), ts: now() };
@@ -1568,12 +1573,12 @@ function relatorioHTML(l) {
   <h2>Faturamento e resultado por show</h2>${cards.join('')}
   <p class="foot">Receita conferida (PDV + ajustes da conferência financeira que mudam a venda). DAS sobre a receita · taxas ${M.taxaReal ? 'reais do extrato InfinitePay' : 'estimadas'} · CMV, bonificações e perdas pelo custo oficial${M.semCusto.length ? ` (<span class="neg">${M.semCusto.length} SKUs sem custo: CMV subestimado</span>)` : ''} · despesas do lote rateadas pela receita · quebra de caixa não muda a venda nem o DAS, mas sai do resultado.${M.conf ? '' : ' <span class="neg">Prévia: conferência financeira não concluída.</span>'}</p>
   ${(() => { const vs = vendasLote(l); if (!vs.length) return ''; const g = {};
-    vs.forEach(v => { const k = v.vendedor || '—'; const x = g[k] ||= { n: 0, pecas: 0, liq: 0, desc: 0, cx: new Set() }; const t = totalVenda(v);
+    vs.forEach(v => { const k = chaveVend(v); const x = g[k] ||= { nome: nomeVend(v), n: 0, pecas: 0, liq: 0, desc: 0, cx: new Set() }; const t = totalVenda(v);
       x.n++; x.liq += t.liq; x.desc += v.desconto || 0; v.itens.forEach(i => x.pecas += i.qtd); x.cx.add(v.cx ? `${v.cx}${v.caixa ? ' · ' + v.caixa : ''}` : (v.caixa || '—')); });
-    const bon = {}; movs.forEach(m => bon[m.quem || '—'] = (bon[m.quem || '—'] || 0) + m.qtd);
+    const bon = {}; movs.forEach(m => { const k = chaveVend(m); bon[k] = (bon[k] || 0) + m.qtd; });
     const ks = Object.entries(g).sort((a, b) => b[1].liq - a[1].liq);
     return `<h2>Vendas por vendedor</h2><table><thead><tr><th class="l">Vendedor</th><th class="l">Caixa</th><th>Vendas</th><th>Peças</th><th>Faturamento (PDV)</th><th>% do lote</th><th>Ticket</th><th>Descontos</th><th>Bonif. lançadas</th></tr></thead><tbody>
-    ${ks.map(([k, x]) => `<tr><td class="l"><b>${esc(k)}</b></td><td class="l">${[...x.cx].map(esc).join('; ')}</td><td>${x.n}</td><td>${x.pecas}</td><td><b>${brl(x.liq)}</b></td><td>${pct(x.liq, r.liq)}</td><td>${brl(x.liq / x.n)}</td><td>${brl(x.desc)}</td><td>${bon[k] || 0}</td></tr>`).join('')}
+    ${ks.map(([k, x]) => `<tr><td class="l"><b>${esc(x.nome)}</b></td><td class="l">${[...x.cx].map(esc).join('; ')}</td><td>${x.n}</td><td>${x.pecas}</td><td><b>${brl(x.liq)}</b></td><td>${pct(x.liq, r.liq)}</td><td>${brl(x.liq / x.n)}</td><td>${brl(x.desc)}</td><td>${bon[k] || 0}</td></tr>`).join('')}
     <tr><th class="l" colspan="2">Total</th><th>${r.n}</th><th>${r.pecas}</th><th>${brl(r.liq)}</th><th>100%</th><th>${brl(r.ticket)}</th><th>${brl(r.desc)}</th><th>${soma(movs, m => m.qtd)}</th></tr></tbody></table>
     <p class="foot">Faturamento lançado no PDV por quem registrou a venda (base da comissão). Ajustes da conferência financeira não são atribuídos a vendedor.</p>`; })()}
   ${(l.despesas || []).length ? `<h2>Despesas do show</h2><table><thead><tr><th class="l">Despesa</th><th class="l">Show</th><th class="l">Obs.</th><th class="l">Lançou</th><th>Valor</th></tr></thead><tbody>${l.despesas.map(d => `<tr><td class="l">${esc(d.cat)}</td><td class="l">${d.showId ? esc(showsPorId[d.showId]?.cidade || '') : 'Todo o lote'}</td><td class="l">${esc(d.obs || '')}</td><td class="l">${esc(d.quem || '')}</td><td>${d.tipo === 'pct' ? String(d.valor).replace('.', ',') + '% da venda' : brl(d.valor)}</td></tr>`).join('')}
