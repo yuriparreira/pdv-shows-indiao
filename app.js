@@ -904,10 +904,13 @@ function margem(l) {
   const perdaTot = Object.entries(baixasAjustadas(l)).reduce((a, [s, it]) => a + cmvDe(s, it.perda), 0);
   const recTot = cols.reduce((a, c) => a + c.rec, 0); const pesoF = c => recTot ? c.rec / recTot : 1 / (cols.length || 1);
   cols.forEach(c => { c.perda = perdaTot * pesoF(c); c.das = c.rec * (S.cfg.das || 0) / 100; });
-  // despesas: do show ou do lote (rateadas pela receita); comissão em % incide sobre a receita
+  // venda de um vendedor num show: PDV + venda achada na conferência com o nome dele (no show da transação ou rateada)
+  const recVend = (key, c) => vendasLote(l).filter(v => chaveVend(v) === key && (v.showId === c.id || (!cols.some(x => x.id === v.showId) && c === cols[0]))).reduce((a, v) => a + totalVenda(v).liq, 0)
+    + (conf ? F.f.ajustes.filter(a => a.cat === 'venda_nr' && (a.vendedorId || a.vendedor) && chaveVend(a) === key).reduce((t, a) => { const al = showDoAjuste(a); return t + (al ? (al === c ? F.sinal(a) : 0) : F.sinal(a) * peso(c)); }, 0) : 0);
+  // despesas: do show ou do lote (rateadas pela receita); comissão em % incide sobre a receita (ou só sobre as vendas do vendedor)
   (l.despesas || []).forEach(d => {
     const alvo = d.showId ? cols.filter(c => c.id === d.showId) : cols;
-    alvo.forEach(c => { const base = d.showId ? 1 : pesoF(c); const v = d.tipo === 'pct' ? c.rec * d.valor / 100 : d.valor * base; c.desp += v; c.despItens.push({ ...d, efetivo: v }); });
+    alvo.forEach(c => { const base = d.showId ? 1 : pesoF(c); const v = d.tipo === 'pct' ? (d.vendedorKey ? recVend(d.vendedorKey, c) : c.rec) * d.valor / 100 : d.valor * base; c.desp += v; c.despItens.push({ ...d, efetivo: v }); });
   });
   // quebra de caixa e "outro": não mudam a venda (nem o pedido do Tiny, nem o DAS), mas tiram dinheiro do resultado.
   // Positivo = faltou dinheiro. Vai para o show da transação, se houver; senão é rateado pela receita.
@@ -941,7 +944,7 @@ function tMargem(l) {
   <div class="tw">${tabelaMargem(M)}</div></div>
   <div class="card"><h2>Despesas do show</h2>
   <p class="muted small">Comissão, diárias de alimentação, fotos e o que mais sair do caixa do show. Ônibus e hotel são da turnê. Despesa do lote inteiro é rateada pela receita de cada show.</p>
-  ${(l.despesas || []).map((d, i) => `<div class="line"><div class="grow"><b>${esc(d.cat)}</b><div class="muted small">${d.showId ? esc(shows[d.showId]?.cidade || '') : 'Todo o lote'}${d.obs ? ' · ' + esc(d.obs) : ''} · ${esc(d.quem || '')}</div></div><b>${d.tipo === 'pct' ? String(d.valor).replace('.', ',') + '% da venda' : brl(d.valor)}</b><button class="iconbtn" data-a="rmDesp" data-i="${i}">✕</button></div>`).join('') || '<div class="muted small">Nenhuma despesa lançada.</div>'}
+  ${(l.despesas || []).map((d, i) => `<div class="line"><div class="grow"><b>${esc(d.cat)}</b><div class="muted small">${d.showId ? esc(shows[d.showId]?.cidade || '') : 'Todo o lote'}${d.obs ? ' · ' + esc(d.obs) : ''} · ${esc(d.quem || '')}</div></div><b>${d.tipo === 'pct' ? `${String(d.valor).replace('.', ',')}% ${d.vendedorKey ? 'das vendas de ' + esc(d.vendedorNome || '') : 'da venda'} = ${brl(M.cols.reduce((a, c) => a + c.despItens.filter(x => x.id === d.id).reduce((t, x) => t + x.efetivo, 0), 0))}` : brl(d.valor)}</b><button class="iconbtn" data-a="rmDesp" data-i="${i}">✕</button></div>`).join('') || '<div class="muted small">Nenhuma despesa lançada.</div>'}
   <button class="btn primary block" style="margin-top:10px" data-a="novaDesp">+ Lançar despesa</button></div>`;
 }
 function tRelatorio(l) {
@@ -1072,6 +1075,9 @@ function shDespesa() {
   <label class="f">De qual show<select class="i" name="showId"><option value="">Todo o lote (rateio pela receita)</option>${(l.shows || []).map(s => `<option value="${s.id}" ${s.id === showAtual(l)?.id ? 'selected' : ''}>${esc(s.cidade)}/${s.uf} · ${fmtD(s.data)}</option>`).join('')}</select></label>
   <div class="grid2"><label class="f">Forma<select class="i" name="tipo" data-in="despTipo"><option value="valor" ${!pct ? 'selected' : ''}>Valor (R$)</option><option value="pct" ${pct ? 'selected' : ''}>% sobre a venda</option></select></label>
   <label class="f">${pct ? 'Percentual' : 'Valor (R$)'}<input class="i" name="valor" inputmode="decimal" required value="${pct && S.cfg.comissaoPct ? String(S.cfg.comissaoPct).replace('.', ',') : ''}"></label></div>
+  ${pct ? (() => { const ops = {}; equipeAtiva().forEach(p => ops[p.id] = p.nome); vendasLote(l).forEach(v => ops[chaveVend(v)] ||= nomeVend(v));
+    return `<label class="f">Sobre quais vendas<select class="i" name="vendedorKey"><option value="">Todas as vendas (do show ou do lote)</option>${Object.entries(ops).map(([k, n]) => `<option value="${esc(k)}">Só as vendas de ${esc(n)}</option>`).join('')}</select></label>
+    <p class="muted small">Por vendedor: o percentual incide só sobre as vendas dele (inclui venda achada na conferência com o nome dele). Lance uma comissão para cada vendedor.</p>`; })() : ''}
   <label class="f">Observação<input class="i" name="obs" placeholder="${cat === 'Comissão sobre vendas' ? 'ex.: vendedores do show' : 'ex.: 3 diárias × R$ 60'}"></label>
   <button class="btn ok block">Lançar</button></form>`;
 }
@@ -1331,6 +1337,7 @@ document.addEventListener('submit', async ev => {
     S.retro = { loteId: l.id, nome, vendedorId: p?.id || '', ts: ts.toISOString(), showId: fd.get('showId') };
     S.cart = []; S.cartDesc = 0; S.pagamentos = []; S.sheet = null; S.tab = 'vender'; render(); toast(`Lançando em nome de ${nome}`); }
   if (k === 'despesa') { const l = lote(); const d = { id: uid(), cat: fd.get('cat'), showId: fd.get('showId') || '', tipo: fd.get('tipo'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: nomeVendedor(), ts: now() };
+    if (d.tipo === 'pct' && fd.get('vendedorKey')) { d.vendedorKey = fd.get('vendedorKey'); d.vendedorNome = equipeAtiva().find(p => p.id === d.vendedorKey)?.nome || vendasLote(l).map(v => chaveVend(v) === d.vendedorKey ? nomeVend(v) : '').find(Boolean) || d.vendedorKey.replace(/^nome:/, ''); }
     if (!d.valor) { toast('Informe o valor', null, true); return; } (l.despesas ||= []).push(d); await saveLote(l); S.sheet = null; render(); toast('Despesa lançada'); }
   if (k === 'ajuste') { const l = lote(); const cat = CAT_AJ[fd.get('cat')]; const a = { id: uid(), cat: cat.id, dir: cat.neutro ? 'mais' : fd.get('dir'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: nomeVendedor(), ts: now() };
     if (cat.sku) { const qs = fd.getAll('qtd'); const its = {}; fd.getAll('sku').forEach((sku, i) => { if (sku) its[sku] = (its[sku] || 0) + Math.max(1, Math.round(num(qs[i]))); });
@@ -1600,7 +1607,7 @@ function relatorioHTML(l) {
     ${ks.map(([k, x]) => `<tr><td class="l"><b>${esc(x.nome)}</b></td><td class="l">${[...x.cx].map(esc).join('; ')}</td><td>${x.n}</td><td>${x.pecas}</td><td><b>${brl(x.liq)}</b>${x.achada ? `<br><span class="small">${brl(x.achada)} achado na conferência</span>` : ''}</td><td>${pct(x.liq, T.liq)}</td><td>${brl(x.liq / x.n)}</td><td>${brl(x.desc)}</td><td>${bon[k] || 0}</td></tr>`).join('')}
     <tr><th class="l" colspan="2">Total</th><th>${T.n}</th><th>${T.pecas}</th><th>${brl(T.liq)}</th><th>100%</th><th>${brl(T.n ? T.liq / T.n : 0)}</th><th>${brl(T.desc)}</th><th>${soma(movs, m => m.qtd)}</th></tr></tbody></table>
     <p class="foot">Faturamento lançado no PDV por quem registrou a venda (base da comissão)${achadas ? `, mais ${achadas} venda(s) achada(s) na conferência financeira com vendedor informado` : ''}. Outros ajustes da conferência (descontos, preço, estorno) não são atribuídos a vendedor.</p>`; })()}
-  ${(l.despesas || []).length ? `<h2>Despesas do show</h2><table><thead><tr><th class="l">Despesa</th><th class="l">Show</th><th class="l">Obs.</th><th class="l">Lançou</th><th>Valor</th></tr></thead><tbody>${l.despesas.map(d => `<tr><td class="l">${esc(d.cat)}</td><td class="l">${d.showId ? esc(showsPorId[d.showId]?.cidade || '') : 'Todo o lote'}</td><td class="l">${esc(d.obs || '')}</td><td class="l">${esc(d.quem || '')}</td><td>${d.tipo === 'pct' ? String(d.valor).replace('.', ',') + '% da venda' : brl(d.valor)}</td></tr>`).join('')}
+  ${(l.despesas || []).length ? `<h2>Despesas do show</h2><table><thead><tr><th class="l">Despesa</th><th class="l">Show</th><th class="l">Obs.</th><th class="l">Lançou</th><th>Valor</th></tr></thead><tbody>${l.despesas.map(d => `<tr><td class="l">${esc(d.cat)}</td><td class="l">${d.showId ? esc(showsPorId[d.showId]?.cidade || '') : 'Todo o lote'}</td><td class="l">${esc(d.obs || '')}</td><td class="l">${esc(d.quem || '')}</td><td>${d.tipo === 'pct' ? `${String(d.valor).replace('.', ',')}% ${d.vendedorKey ? 'das vendas de ' + esc(d.vendedorNome || '') : 'da venda'} = ${brl(M.cols.reduce((t, c) => t + c.despItens.filter(x => x.id === d.id).reduce((u, x) => u + x.efetivo, 0), 0))}` : brl(d.valor)}</td></tr>`).join('')}
     <tr><th class="l" colspan="4">Total</th><th>${brl(M.tot.desp)}</th></tr></tbody></table>` : ''}
   ${movs.length ? `<h2>Bonificações (CFOP ${esc(S.cfg.cfopBonif)})</h2><table><thead><tr><th class="l">Data</th><th class="l">Tipo</th><th class="l">SKU</th><th class="l">Descrição</th><th>Qtd</th><th>Custo</th><th class="l">Autorizou</th><th class="l">Lançou</th><th class="l">Obs.</th></tr></thead><tbody>
   ${movs.map(m => `<tr><td class="l">${fmtDT(m.ts)}</td><td class="l">${esc(MOV[m.tipo] || m.tipo)}</td><td class="l">${esc(m.sku)}</td><td class="l">${esc(S.produtos.get(m.sku)?.descricao || '')}</td><td>${m.qtd}</td><td>${brl(custoDe(m.sku) * m.qtd)}</td><td class="l">${esc(m.autorizou)}</td><td class="l">${esc(m.quem)}</td><td class="l">${esc(m.obs)}</td></tr>`).join('')}</tbody></table>` : ''}
