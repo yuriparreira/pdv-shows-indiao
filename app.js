@@ -215,7 +215,7 @@ async function entrarVendedor(id) {
 }
 const ABAS_VENDEDOR = ['vender', 'vendas', 'movs', 'contagem'];
 const SO_GESTOR = new Set(['importarCaixa', 'destravar', 'fecharLote', 'corrigirData', 'precoItem', 'reabrirFin', 'concluirFin', 'enviarConfig', 'backupTudo', 'sincAgora',
-  'novaDesp', 'rmDesp', 'novoAjuste', 'rmAjuste', 'addOutro', 'rmOutro', 'csvTiny', 'tinyCsv', 'pdf', 'cancelarVenda', 'cancelarMov', 'contarCarga', 'reimportarCarga', 'excluirLote', 'restaurarLote', 'precoModelo', 'baixarFotos', 'ajusteDeTx', 'addVend', 'pinVend', 'ativoVend', 'retro']);
+  'novaDesp', 'rmDesp', 'novoAjuste', 'rmAjuste', 'addOutro', 'rmOutro', 'csvTiny', 'tinyCsv', 'pdf', 'cancelarVenda', 'cancelarMov', 'contarCarga', 'reimportarCarga', 'excluirLote', 'restaurarLote', 'precoModelo', 'baixarFotos', 'ajusteDeTx', 'addVend', 'pinVend', 'ativoVend', 'retro', 'vendaAchada']);
 const precisaGestor = el => { const a = el.dataset.a; return SO_GESTOR.has(a) || (a === 'ir' && el.dataset.v === 'catalogo') || (a === 'tab' && !ABAS_VENDEDOR.includes(el.dataset.t)); };
 const saveLote = l => { l.atualizado = now(); return DB.put('lotes', l); };
 
@@ -770,7 +770,8 @@ function divergencias(l, sd) {
     <div class="row"><div class="grow"><b>${esc(p(x.s)?.descricao || x.s)}</b><div class="muted small">${esc(x.s)} · esperado ${x.saldo} · contado ${x.ret ?? 0}</div></div><b class="big ${x.dif < 0 ? 'neg' : 'pos'}">${x.dif > 0 ? '+' : ''}${x.dif}</b></div>
     ${l.status !== 'fechado' ? `<input class="i" style="width:100%;margin-top:10px" data-in="obsDif" data-s="${esc(x.s)}" value="${esc((l.obsDif || {})[x.s] || '')}" placeholder="Observação (obrigatória)">
     <div class="chips">${['Bonificação não lançada', 'Venda não registrada', 'Perda / furto', 'Avaria', 'SKU trocado na venda', 'Erro na carga'].map(c => `<button class="chip" data-a="obsChip" data-s="${esc(x.s)}" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>`
-    : `<div class="small" style="margin-top:6px">Obs.: ${esc((l.obsDif || {})[x.s] || '—')}</div>`}</div>`).join('')}
+    : `<div class="small" style="margin-top:6px">Obs.: ${esc((l.obsDif || {})[x.s] || '—')}</div>`}
+    ${x.dif < 0 && gestor() && !l.perdaExportada ? `<button class="btn block" style="margin-top:8px;min-height:44px" data-a="vendaAchada" data-s="${esc(x.s)}" data-q="${-x.dif}">Venda achada: lançar na conferência financeira</button>` : ''}</div>`).join('')}
   <div class="card tw"><table class="t"><thead><tr><th>SKU</th><th>Carga</th><th>Vend.</th><th>Bonif.</th><th>Esper.</th><th>Cont.</th><th>Dif.</th></tr></thead><tbody>
   ${linhas.sort((a, b) => a.dif - b.dif || a.s.localeCompare(b.s)).map(x => `<tr><td>${esc(x.s)}</td><td>${x.carga}</td><td>${x.vendido}</td><td>${x.mov}</td><td>${x.saldo}</td><td>${x.ret ?? '–'}</td><td class="${x.dif < 0 ? 'neg' : x.dif > 0 ? 'pos' : 'zerot'}">${x.dif > 0 ? '+' : ''}${x.dif}</td></tr>`).join('')}
   </tbody></table></div>
@@ -810,6 +811,8 @@ const CATS_AJ = [
   { id: 'forma', nome: 'Forma de pagamento trocada', dir: '', venda: false, neutro: true },
   { id: 'outro', nome: 'Outro', dir: '', venda: false }];
 const CAT_AJ = Object.fromEntries(CATS_AJ.map(c => [c.id, c]));
+const itensAj = a => a.itens?.length ? a.itens : (a.sku && a.qtd ? [{ sku: a.sku, qtd: a.qtd }] : []);
+const descAj = a => [itensAj(a).map(i => `${i.qtd}× ${i.sku}`).join(' + '), a.vendedor ? 'vendedor ' + a.vendedor : ''].filter(Boolean).join(' · ');
 function fin(l) {
   const f = l.fin ||= { real: {}, outros: [], ajustes: [], concluido: false };
   const r = resumo(l); const inf = l.conferenciaInfinite;
@@ -829,8 +832,10 @@ function baixasAjustadas(l) {
   const sd = saldos(l); const ret = l.retorno || {}; const F = fin(l);
   const itens = {}; Object.entries(sd).forEach(([s, x]) => { const dif = ret[s] === undefined ? 0 : ret[s] - x.saldo; itens[s] = { q: x.vendido, valor: x.valor, perda: dif < 0 ? -dif : 0, bonif: x.mov }; });
   let resto = F.ajVenda;
-  F.f.ajustes.filter(a => a.cat === 'venda_nr' && a.sku && a.qtd && !l.perdaExportada).forEach(a => { const it = itens[a.sku] ||= { q: 0, valor: 0, perda: 0, bonif: 0 };
-    const v = F.sinal(a); it.q += a.qtd; it.valor += v; it.perda = Math.max(0, it.perda - a.qtd); resto -= v; });
+  F.f.ajustes.filter(a => a.cat === 'venda_nr' && itensAj(a).length && !l.perdaExportada).forEach(a => {
+    const its = itensAj(a); const pesoP = i => (precoShow(S.produtos.get(i.sku) || {}) || 1) * i.qtd; const base = its.reduce((s, i) => s + pesoP(i), 0); const v = F.sinal(a);
+    its.forEach(i => { const it = itens[i.sku] ||= { q: 0, valor: 0, perda: 0, bonif: 0 }; it.q += i.qtd; it.valor += v * pesoP(i) / base; it.perda = Math.max(0, it.perda - i.qtd); });
+    resto -= v; });
   const base = Object.values(itens).reduce((s, it) => s + (it.q ? it.valor : 0), 0);
   if (base && Math.abs(resto) > 0.001) Object.values(itens).forEach(it => { if (it.q) it.valor += resto * it.valor / base; });
   return itens;
@@ -859,7 +864,7 @@ function tFinanceiro(l) {
     ${lst.map(t => `<div class="line"><div class="grow"><b>${brl(t.valor)}</b> · ${FORMA[t.forma]}${t.parc > 1 ? ' ' + t.parc + 'x' : ''}<div class="muted small">${fmtDT(t.t)} · ${esc(t.term)}</div></div><button class="btn" style="min-height:44px" data-a="ajusteDeTx" data-tx="${esc(t.id + t.t)}">Justificar</button></div>`).join('')}</div>`; })()}
   <div class="card"><h2>3. Justificativas</h2>
     <p class="muted small">Toda diferença precisa de explicação. Desconto não lançado, venda não registrada, preço errado e estorno mudam o valor da venda. Quebra de caixa e "outro" não mudam a venda nem o DAS, mas saem da margem do show. Forma trocada só explica diferença entre formas.</p>
-    ${F.f.ajustes.map((a, i) => `<div class="line"><div class="grow"><b>${esc(CAT_AJ[a.cat]?.nome || a.cat)}</b><div class="muted small">${a.sku ? esc(a.sku) + ' · ' + a.qtd + ' pç · ' : ''}${esc(a.obs || '')}${CAT_AJ[a.cat]?.venda ? ' · muda a venda' : ''}</div></div><b class="${a.dir === 'menos' ? 'neg' : 'pos'}">${CAT_AJ[a.cat]?.neutro ? '' : a.dir === 'menos' ? '−' : '+'}${brl(a.valor)}</b>${fe ? '' : `<button class="iconbtn" data-a="rmAjuste" data-i="${i}">✕</button>`}</div>`).join('') || '<div class="muted small">Nenhuma ainda.</div>'}
+    ${F.f.ajustes.map((a, i) => `<div class="line"><div class="grow"><b>${esc(CAT_AJ[a.cat]?.nome || a.cat)}</b><div class="muted small">${descAj(a) ? esc(descAj(a)) + ' · ' : ''}${esc(a.obs || '')}${CAT_AJ[a.cat]?.venda ? ' · muda a venda' : ''}</div></div><b class="${a.dir === 'menos' ? 'neg' : 'pos'}">${CAT_AJ[a.cat]?.neutro ? '' : a.dir === 'menos' ? '−' : '+'}${brl(a.valor)}</b>${fe ? '' : `<button class="iconbtn" data-a="rmAjuste" data-i="${i}">✕</button>`}</div>`).join('') || '<div class="muted small">Nenhuma ainda.</div>'}
     ${fe ? '' : `<button class="btn block" style="min-height:48px;margin-top:8px" data-a="novoAjuste">+ Justificar diferença</button>`}</div>
   <div class="card"><h2>4. Resultado</h2>
     <div class="line"><span class="grow">Venda no pedido do Tiny</span><b>${brl(F.vendaAjustada)}</b></div>
@@ -890,7 +895,7 @@ function margem(l) {
   if (conf) F.f.ajustes.filter(a => CAT_AJ[a.cat]?.venda).forEach(a => {
     const v = F.sinal(a); const alvo = showDoAjuste(a);
     if (alvo) alvo.rec += v; else cols.forEach(c => c.rec += v * peso(c));
-    if (a.cat === 'venda_nr' && a.sku && a.qtd && !l.perdaExportada) { const k = cmvDe(a.sku, a.qtd); if (alvo) alvo.cmv += k; else cols.forEach(c => c.cmv += k * peso(c)); }
+    if (a.cat === 'venda_nr' && !l.perdaExportada) itensAj(a).forEach(i => { const k = cmvDe(i.sku, i.qtd); if (alvo) alvo.cmv += k; else cols.forEach(c => c.cmv += k * peso(c)); });
   });
   // bonificações a custo no show em que saíram; perdas da contagem (já descontadas as vendas achadas) rateadas pela receita
   movsLote(l).forEach(m => { const c = col(m.showId); if (c) c.bonif += cmvDe(m.sku, m.qtd); });
@@ -1080,8 +1085,10 @@ function shAjuste() {
   <label class="f">Valor (R$)<input class="i" name="valor" inputmode="decimal" required value="${st.valor ? String(st.valor.toFixed(2)).replace('.', ',') : Math.abs(F.pendente) >= .01 && !cat.neutro ? String(Math.abs(F.pendente).toFixed(2)).replace('.', ',') : ''}"></label>
   ${st.txId ? `<input type="hidden" name="txId" value="${esc(st.txId)}">` : ''}
   ${cat.sku && l.perdaExportada ? `<p class="small warn">A nota de perda já foi gerada em ${fmtDT(l.perdaExportada.ts)}: a peça continua na perda e o valor entra na venda por rateio.</p>` : ''}
-  ${cat.sku && !l.perdaExportada ? `<div class="grid2"><label class="f">Peça que faltou (opcional)<select class="i" name="sku"><option value="">—</option>${faltas.map(([s, q]) => `<option value="${esc(s)}">${esc(s)} (faltam ${q})</option>`).join('')}</select></label><label class="f">Quantidade<input class="i" name="qtd" inputmode="numeric" value="1"></label></div>
-    <p class="muted small">Com a peça informada, ela sai da perda e entra no pedido de venda.</p>` : ''}
+  ${cat.sku && !l.perdaExportada ? (() => { const pre = st.pre || []; const n = Math.max(3, pre.length + 1);
+    return `<div class="f">Peças que faltaram (opcional)</div>${Array.from({ length: n }, (_, i) => `<div class="grid2" style="grid-template-columns:1fr 90px"><select class="i" name="sku"><option value="">—</option>${faltas.map(([s, q]) => `<option value="${esc(s)}" ${pre[i]?.sku === s ? 'selected' : ''}>${esc(s)} (faltam ${q})</option>`).join('')}</select><input class="i" name="qtd" inputmode="numeric" value="${pre[i]?.qtd || 1}" aria-label="quantidade"></div>`).join('')}
+    <p class="muted small">As peças informadas saem da perda e entram no pedido de venda; o valor é dividido entre elas pelo preço de show.</p>`; })() : ''}
+  ${cat.sku ? `<label class="f">Vendedor (entra em "Vendas por vendedor" e na comissão)${temEquipe() ? `<select class="i" name="vendedorId"><option value="">— sem vendedor —</option>${equipeAtiva().map(p => `<option value="${p.id}" ${p.id === st.vendedorId ? 'selected' : ''}>${esc(p.nome)}</option>`).join('')}</select>` : `<input class="i" name="vendedorNome" placeholder="nome de quem vendeu (opcional)">`}</label>` : ''}
   <label class="f">Observação<input class="i" name="obs" value="${esc(st.obs || '')}" placeholder="ex.: 2 bonés por R$ 200 no fim do show" ${cat.id === 'outro' ? 'required' : ''}></label>
   <button class="btn ok block">Lançar justificativa</button></form>`;
 }
@@ -1185,6 +1192,10 @@ const A = {
   recontar: () => { S.contagemRevelada = false; render(); },
   entrarVendedor: () => entrarVendedor(),
   entrarComo: e => entrarVendedor(e.dataset.id),
+  vendaAchada: async e => { const l = lote(); const F = fin(l);
+    if (F.f.concluido) { toast('A conferência financeira está concluída: reabra na aba Financeiro e toque de novo', null, true); S.tab = 'financeiro'; render(); return; }
+    const q = +e.dataset.q; const p = S.produtos.get(e.dataset.s);
+    S.sheet = { k: 'ajuste', cat: 'venda_nr', pre: [{ sku: e.dataset.s, qtd: q }], valor: (p ? precoShow(p) : 0) * q || undefined, obs: 'achada na contagem' }; renderSheet(); },
   retro: () => { S.sheet = { k: 'retro' }; renderSheet(); },
   retroFim: () => { S.retro = null; S.cart = []; S.cartDesc = 0; S.pagamentos = []; render(); toast('Lançamento retroativo encerrado'); },
   entrarGestor: () => entrarGestor(),
@@ -1319,7 +1330,10 @@ document.addEventListener('submit', async ev => {
   if (k === 'despesa') { const l = lote(); const d = { id: uid(), cat: fd.get('cat'), showId: fd.get('showId') || '', tipo: fd.get('tipo'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: nomeVendedor(), ts: now() };
     if (!d.valor) { toast('Informe o valor', null, true); return; } (l.despesas ||= []).push(d); await saveLote(l); S.sheet = null; render(); toast('Despesa lançada'); }
   if (k === 'ajuste') { const l = lote(); const cat = CAT_AJ[fd.get('cat')]; const a = { id: uid(), cat: cat.id, dir: cat.neutro ? 'mais' : fd.get('dir'), valor: Math.abs(num(fd.get('valor'))), obs: (fd.get('obs') || '').trim(), quem: nomeVendedor(), ts: now() };
-    if (cat.sku && fd.get('sku')) { a.sku = fd.get('sku'); a.qtd = Math.max(1, Math.round(num(fd.get('qtd')))); }
+    if (cat.sku) { const qs = fd.getAll('qtd'); const its = {}; fd.getAll('sku').forEach((sku, i) => { if (sku) its[sku] = (its[sku] || 0) + Math.max(1, Math.round(num(qs[i]))); });
+      const lista = Object.entries(its).map(([sku, qtd]) => ({ sku, qtd })); if (lista.length) a.itens = lista;
+      const vid = fd.get('vendedorId') || ''; const p = equipeAtiva().find(x => x.id === vid);
+      if (p) { a.vendedorId = p.id; a.vendedor = p.nome; } else if ((fd.get('vendedorNome') || '').trim()) a.vendedor = fd.get('vendedorNome').trim(); }
     if (fd.get('txId')) a.txId = fd.get('txId');
     if (!a.valor) { toast('Informe o valor', null, true); return; }
     fin(l).f.ajustes.push(a); await saveLote(l); S.sheet = null; render(); toast('Justificativa lançada'); }
@@ -1538,7 +1552,7 @@ function relatorioHTML(l) {
     ${outrosRec || outroPdv ? `<tr><td class="l">Outros meios${F.f.outros.length ? ' (' + F.f.outros.map(o => esc(o.nome || '?')).join(', ') + ')' : ''}</td><td>${brl(outroPdv)}</td><td>${brl(outrosRec)}</td><td class="${Math.abs(outrosRec - outroPdv) >= .01 ? 'neg' : ''}">${brl(outrosRec - outroPdv)}</td></tr>` : ''}
     <tr class="tot"><td class="l">Total</td><td>${brl(F.r.liq)}</td><td>${brl(F.realTotal)}</td><td class="${Math.abs(F.dif) >= .01 ? 'neg' : ''}">${brl(F.dif)}</td></tr></tbody></table>
     ${F.f.ajustes.length ? `<table class="mini just"><thead><tr><th class="l">Justificativa da diferença</th><th>Valor</th><th class="l">Efeito</th></tr></thead><tbody>
-    ${F.f.ajustes.map(x => { const c = CAT_AJ[x.cat] || {}; return `<tr><td class="l"><b>${esc(c.nome || x.cat)}</b>${x.sku ? ' · ' + esc(x.sku) + ' (' + x.qtd + ' pç)' : ''}${x.obs ? ' · ' + esc(x.obs) : ''}${x.quem ? ' · ' + esc(x.quem) : ''}</td><td>${c.neutro ? '' : x.dir === 'menos' ? '−' : '+'}${brl(x.valor)}</td><td class="l">${c.neutro ? 'só entre formas' : c.venda ? 'muda a venda' : 'sai da margem'}</td></tr>`; }).join('')}</tbody></table>` : ''}
+    ${F.f.ajustes.map(x => { const c = CAT_AJ[x.cat] || {}; return `<tr><td class="l"><b>${esc(c.nome || x.cat)}</b>${descAj(x) ? ' · ' + esc(descAj(x)) : ''}${x.obs ? ' · ' + esc(x.obs) : ''}${x.quem ? ' · ' + esc(x.quem) : ''}</td><td>${c.neutro ? '' : x.dir === 'menos' ? '−' : '+'}${brl(x.valor)}</td><td class="l">${c.neutro ? 'só entre formas' : c.venda ? 'muda a venda' : 'sai da margem'}</td></tr>`; }).join('')}</tbody></table>` : ''}
     <div class="checks"><span class="${Math.abs(F.pendente) < .01 ? 'ok' : 'neg'}">Diferença total sem justificativa: <b>${brl(F.pendente)}</b></span>
     ${entreFormasSemJust >= .01 ? `<span class="neg">Diferença entre formas compensada (${brl(entreFormasSemJust)}) sem justificativa "forma de pagamento trocada"</span>` : ''}
     ${F.faltaInformar.length ? `<span class="neg">Falta informar o recebido: ${F.faltaInformar.join(', ')}</span>` : ''}</div>`;
@@ -1575,12 +1589,14 @@ function relatorioHTML(l) {
   ${(() => { const vs = vendasLote(l); if (!vs.length) return ''; const g = {};
     vs.forEach(v => { const k = chaveVend(v); const x = g[k] ||= { nome: nomeVend(v), n: 0, pecas: 0, liq: 0, desc: 0, cx: new Set() }; const t = totalVenda(v);
       x.n++; x.liq += t.liq; x.desc += v.desconto || 0; v.itens.forEach(i => x.pecas += i.qtd); x.cx.add(v.cx ? `${v.cx}${v.caixa ? ' · ' + v.caixa : ''}` : (v.caixa || '—')); });
+    let achadas = 0; if (F.f.concluido) F.f.ajustes.filter(a => a.cat === 'venda_nr' && (a.vendedorId || a.vendedor)).forEach(a => { const k = chaveVend(a); const x = g[k] ||= { nome: nomeVend(a), n: 0, pecas: 0, liq: 0, desc: 0, cx: new Set() };
+      x.n++; x.liq += F.sinal(a); x.pecas += itensAj(a).reduce((s, i) => s + i.qtd, 0); x.achada = (x.achada || 0) + F.sinal(a); x.cx.add('conferência'); achadas++; });
     const bon = {}; movs.forEach(m => { const k = chaveVend(m); bon[k] = (bon[k] || 0) + m.qtd; });
-    const ks = Object.entries(g).sort((a, b) => b[1].liq - a[1].liq);
-    return `<h2>Vendas por vendedor</h2><table><thead><tr><th class="l">Vendedor</th><th class="l">Caixa</th><th>Vendas</th><th>Peças</th><th>Faturamento (PDV)</th><th>% do lote</th><th>Ticket</th><th>Descontos</th><th>Bonif. lançadas</th></tr></thead><tbody>
-    ${ks.map(([k, x]) => `<tr><td class="l"><b>${esc(x.nome)}</b></td><td class="l">${[...x.cx].map(esc).join('; ')}</td><td>${x.n}</td><td>${x.pecas}</td><td><b>${brl(x.liq)}</b></td><td>${pct(x.liq, r.liq)}</td><td>${brl(x.liq / x.n)}</td><td>${brl(x.desc)}</td><td>${bon[k] || 0}</td></tr>`).join('')}
-    <tr><th class="l" colspan="2">Total</th><th>${r.n}</th><th>${r.pecas}</th><th>${brl(r.liq)}</th><th>100%</th><th>${brl(r.ticket)}</th><th>${brl(r.desc)}</th><th>${soma(movs, m => m.qtd)}</th></tr></tbody></table>
-    <p class="foot">Faturamento lançado no PDV por quem registrou a venda (base da comissão). Ajustes da conferência financeira não são atribuídos a vendedor.</p>`; })()}
+    const ks = Object.entries(g).sort((a, b) => b[1].liq - a[1].liq); const T = ks.reduce((t, [, x]) => ({ n: t.n + x.n, pecas: t.pecas + x.pecas, liq: t.liq + x.liq, desc: t.desc + x.desc }), { n: 0, pecas: 0, liq: 0, desc: 0 });
+    return `<h2>Vendas por vendedor</h2><table><thead><tr><th class="l">Vendedor</th><th class="l">Caixa</th><th>Vendas</th><th>Peças</th><th>Faturamento</th><th>% do lote</th><th>Ticket</th><th>Descontos</th><th>Bonif. lançadas</th></tr></thead><tbody>
+    ${ks.map(([k, x]) => `<tr><td class="l"><b>${esc(x.nome)}</b></td><td class="l">${[...x.cx].map(esc).join('; ')}</td><td>${x.n}</td><td>${x.pecas}</td><td><b>${brl(x.liq)}</b>${x.achada ? `<br><span class="small">${brl(x.achada)} achado na conferência</span>` : ''}</td><td>${pct(x.liq, T.liq)}</td><td>${brl(x.liq / x.n)}</td><td>${brl(x.desc)}</td><td>${bon[k] || 0}</td></tr>`).join('')}
+    <tr><th class="l" colspan="2">Total</th><th>${T.n}</th><th>${T.pecas}</th><th>${brl(T.liq)}</th><th>100%</th><th>${brl(T.n ? T.liq / T.n : 0)}</th><th>${brl(T.desc)}</th><th>${soma(movs, m => m.qtd)}</th></tr></tbody></table>
+    <p class="foot">Faturamento lançado no PDV por quem registrou a venda (base da comissão)${achadas ? `, mais ${achadas} venda(s) achada(s) na conferência financeira com vendedor informado` : ''}. Outros ajustes da conferência (descontos, preço, estorno) não são atribuídos a vendedor.</p>`; })()}
   ${(l.despesas || []).length ? `<h2>Despesas do show</h2><table><thead><tr><th class="l">Despesa</th><th class="l">Show</th><th class="l">Obs.</th><th class="l">Lançou</th><th>Valor</th></tr></thead><tbody>${l.despesas.map(d => `<tr><td class="l">${esc(d.cat)}</td><td class="l">${d.showId ? esc(showsPorId[d.showId]?.cidade || '') : 'Todo o lote'}</td><td class="l">${esc(d.obs || '')}</td><td class="l">${esc(d.quem || '')}</td><td>${d.tipo === 'pct' ? String(d.valor).replace('.', ',') + '% da venda' : brl(d.valor)}</td></tr>`).join('')}
     <tr><th class="l" colspan="4">Total</th><th>${brl(M.tot.desp)}</th></tr></tbody></table>` : ''}
   ${movs.length ? `<h2>Bonificações (CFOP ${esc(S.cfg.cfopBonif)})</h2><table><thead><tr><th class="l">Data</th><th class="l">Tipo</th><th class="l">SKU</th><th class="l">Descrição</th><th>Qtd</th><th>Custo</th><th class="l">Autorizou</th><th class="l">Lançou</th><th class="l">Obs.</th></tr></thead><tbody>
