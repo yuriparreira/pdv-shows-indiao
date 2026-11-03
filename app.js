@@ -811,6 +811,8 @@ const CATS_AJ = [
   { id: 'forma', nome: 'Forma de pagamento trocada', dir: '', venda: false, neutro: true },
   { id: 'outro', nome: 'Outro', dir: '', venda: false }];
 const CAT_AJ = Object.fromEntries(CATS_AJ.map(c => [c.id, c]));
+// quanto voltou do SKU: depois de travar as vendas, SKU não contado vale zero (mesma regra da tela da contagem e do fechamento)
+const contado = (l, s) => (l.retorno || {})[s] ?? (l.status === 'aberto' ? undefined : 0);
 const itensAj = a => a.itens?.length ? a.itens : (a.sku && a.qtd ? [{ sku: a.sku, qtd: a.qtd }] : []);
 const descAj = a => [itensAj(a).map(i => `${i.qtd}× ${i.sku}`).join(' + '), a.vendedor ? 'vendedor ' + a.vendedor : ''].filter(Boolean).join(' · ');
 function fin(l) {
@@ -830,7 +832,7 @@ function fin(l) {
 // o restante do ajuste que mexe na venda é rateado pelos itens vendidos, proporcional ao valor
 function baixasAjustadas(l) {
   const sd = saldos(l); const ret = l.retorno || {}; const F = fin(l);
-  const itens = {}; Object.entries(sd).forEach(([s, x]) => { const dif = ret[s] === undefined ? 0 : ret[s] - x.saldo; itens[s] = { q: x.vendido, valor: x.valor, perda: dif < 0 ? -dif : 0, bonif: x.mov }; });
+  const itens = {}; Object.entries(sd).forEach(([s, x]) => { const c = contado(l, s); const dif = c === undefined ? 0 : c - x.saldo; itens[s] = { q: x.vendido, valor: x.valor, perda: dif < 0 ? -dif : 0, bonif: x.mov }; });
   let resto = F.ajVenda;
   F.f.ajustes.filter(a => a.cat === 'venda_nr' && itensAj(a).length && !l.perdaExportada).forEach(a => {
     const its = itensAj(a); const pesoP = i => (precoShow(S.produtos.get(i.sku) || {}) || 1) * i.qtd; const base = its.reduce((s, i) => s + pesoP(i), 0); const v = F.sinal(a);
@@ -1076,7 +1078,8 @@ function shDespesa() {
 function shAjuste() {
   const l = lote(); const F = fin(l); const st = S.sheet; const cat = CAT_AJ[st.cat || 'desconto'];
   const sd = saldos(l); const ret = l.retorno || {};
-  const faltas = Object.entries(sd).map(([s, x]) => [s, ret[s] === undefined ? 0 : x.saldo - ret[s]]).filter(([, q]) => q > 0);
+  const faltas = Object.entries(sd).map(([s, x]) => { const c = contado(l, s); return [s, c === undefined ? 0 : x.saldo - c]; }).filter(([, q]) => q > 0);
+  (st.pre || []).forEach(p => { if (!faltas.some(([s]) => s === p.sku)) faltas.push([p.sku, p.qtd]); }); // a peça do atalho sempre aparece
   return `<div class="row"><h3 class="grow">Justificar diferença</h3><button class="iconbtn" data-a="fechar">✕</button></div>
   <p class="muted small">Diferença sem justificativa: <b>${brl(F.pendente)}</b> (${F.pendente >= 0 ? 'entrou a mais' : 'entrou a menos'} que o lançado).</p>
   <form data-f="ajuste">
@@ -1525,8 +1528,8 @@ async function receberCaixa(file) {
 function relatorioHTML(l) {
   const r = resumo(l); const sd = saldos(l); const ret = l.retorno || {}; const fech = l.status === 'fechado'; const obs = l.obsDif || {};
   const linhas = Object.entries(sd).filter(([, x]) => x.carga || x.vendido || x.mov).map(([s, x]) => {
-    const dif = ret[s] === undefined ? null : ret[s] - x.saldo;
-    return { s, p: S.produtos.get(s) || { descricao: s }, ...x, ret: ret[s], dif, perda: dif < 0 ? -dif : 0, sobra: dif > 0 ? dif : 0 };
+    const c = contado(l, s); const dif = c === undefined ? null : c - x.saldo;
+    return { s, p: S.produtos.get(s) || { descricao: s }, ...x, ret: c, dif, perda: dif < 0 ? -dif : 0, sobra: dif > 0 ? dif : 0 };
   }).sort((a, b) => (a.dif || 0) - (b.dif || 0) || (b.vendido + b.mov) - (a.vendido + a.mov) || a.s.localeCompare(b.s)); // divergências e movimentados primeiro
   const movs = movsLote(l); const inf = l.conferenciaInfinite; const F = fin(l); const M = margem(l); const a = analiseInfinite(l);
   const semSaldo = vendasLote(l).flatMap(v => v.itens.filter(i => i.semSaldo).map(i => ({ ...i, num: v.num, cx: v.cx, motivo: i.semSaldo })));
