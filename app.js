@@ -581,6 +581,8 @@ function vConfig() {
   <label class="f">Nome deste caixa / aparelho<input class="i" name="caixa" value="${esc(S.cfg.caixa)}" placeholder="ex.: Caixa 1 · Maquininha 6368" required></label>
   <label class="f">Código do caixa (curto e diferente em cada celular; entra no número da venda)<input class="i" name="caixaCod" value="${esc(S.cfg.caixaCod || '')}" maxlength="4" placeholder="${esc(codCaixa())} (ex.: C1, C2)" style="text-transform:uppercase"></label>
   ${temEquipe() ? `<p class="muted small">Com equipe cadastrada, a venda vai para quem entrou com o PIN${sessao() ? ' (agora: ' + esc(sessao().nome) + ')' : ''}. "Seu nome" vale só quando o gestor vende sem entrar como vendedor.</p>` : ''}
+  <label class="f">Cobrar cartão neste celular<select class="i" name="tap"><option value="" ${!S.cfg.tap ? 'selected' : ''}>Na maquininha (digita o valor nela)</option><option value="1" ${S.cfg.tap ? 'selected' : ''}>No InfiniteTap (o PDV abre o app da InfinitePay com o valor)</option></select></label>
+  <label class="f">InfiniteTag da conta (opcional, só para o InfiniteTap, sem o $)<input class="i" name="tapHandle" value="${esc(S.cfg.tapHandle || '')}" autocapitalize="off" placeholder="ex.: indiaostore"></label>
   <label class="f">Tema<select class="i" name="tema"><option value="dark" ${S.cfg.tema !== 'light' ? 'selected' : ''}>Escuro (show à noite)</option><option value="light" ${S.cfg.tema === 'light' ? 'selected' : ''}>Claro (sol forte)</option></select></label>
   ${!gestor() ? `<button class="btn primary block">Salvar</button></form><div class="card" style="margin-top:16px"><h2>Perfil</h2><p class="muted small">Modo vendedor: vender, lançar bonificação e contar. O restante é do gestor.</p><button class="btn block" data-a="perfil">Entrar como gestor</button></div></main>` : `
   <div class="card"><h2>PIN do gestor</h2><p class="muted small">${S.cfg.pinHash ? 'PIN definido. Para trocar, digite um novo.' : 'Sem PIN, qualquer pessoa acessa tudo.'} Com PIN, o app abre em modo vendedor (venda, bonificação e contagem) e o gestor entra pelo selo "👤 vendedor" no topo. O PIN vai junto no "Enviar configuração".</p>
@@ -1007,15 +1009,21 @@ function shPagar() {
     <div class="chips">${[falta, 50, 100, 150, 200, 250, 300].filter((v, i, a) => v >= falta && a.indexOf(v) === i).slice(0, 5).map(v => `<button class="chip" data-a="recebido" data-v="${v}">${brl(v)}</button>`).join('')}</div>
     <div id="trocoBox" class="total"><span class="muted">Troco</span><b class="big">${brl(0)}</b></div>
     <button class="btn ok block" data-a="confDinheiro">Confirmar dinheiro</button>`;
+  if (st.tap) { const t = st.tap; return `<div class="row"><h3 class="grow">InfiniteTap · ${t.forma === 'credito' ? 'Crédito' + (t.parcelas > 1 ? ' ' + t.parcelas + 'x' : ' à vista') : 'Débito'}</h3><button class="iconbtn" data-a="volPag">‹</button></div>
+    <div class="total"><span class="muted">Cobrando no app da InfinitePay</span><b class="big">${brl(t.valor)}</b></div>
+    <p class="muted small">Pedido ${esc(t.order)}. O cliente aproxima o cartão no celular. Volte para cá quando o app mostrar o resultado.${t.erro ? `<br><span class="neg">${esc(t.erro)}</span>` : ''}</p>
+    <button class="btn ok block" style="min-height:64px;font-size:19px" data-a="tapOk">✓ Aprovou</button>
+    <div class="grid2" style="margin-top:8px"><button class="btn" data-a="tapAbrir">Abrir o app de novo</button><button class="btn danger" data-a="volPag">Não passou</button></div>
+    <button class="btn block" style="min-height:44px;margin-top:8px" data-a="tapMaq">Passei na maquininha física</button>`; }
   if (st.forma === 'credito') return `<div class="row"><h3 class="grow">Crédito · ${brl(st.valor ?? falta)}</h3><button class="iconbtn" data-a="volPag">‹</button></div>
     <p class="muted">Parcelas (até 6x sem juros)</p><div class="sizes">${[1, 2, 3, 4, 5, 6].map(n => `<button class="size" data-a="parcelas" data-n="${n}">${n}x<small>${brl((st.valor ?? falta) / n)}</small></button>`).join('')}</div>`;
   return `<div class="row"><h3 class="grow">Pagamento</h3><button class="iconbtn" data-a="fechar">✕</button></div>
   <div class="total"><span class="muted">${pago ? 'Falta' : 'Total'}</span><b class="big">${brl(falta)}</b></div>
-  ${S.pagamentos.length ? `<div class="card">${S.pagamentos.map((p, i) => `<div class="line"><span class="grow">${p.nome ? esc(p.nome) : FORMA[p.forma]}${p.parcelas > 1 ? ' ' + p.parcelas + 'x' : ''}${p.troco ? ` <span class="muted small">(recebeu ${brl(p.valor + p.troco)}, troco ${brl(p.troco)})</span>` : ''}</span><b>${brl(p.valor)}</b><button class="iconbtn" data-a="rmPag" data-i="${i}">✕</button></div>`).join('')}</div>` : ''}
+  ${S.pagamentos.length ? `<div class="card">${S.pagamentos.map((p, i) => `<div class="line"><span class="grow">${p.nome ? esc(p.nome) : FORMA[p.forma]}${p.parcelas > 1 ? ' ' + p.parcelas + 'x' : ''}${p.tap ? ' <span class="muted small">· InfiniteTap' + (p.tap.nsu ? ' ✓' : '') + '</span>' : ''}${p.troco ? ` <span class="muted small">(recebeu ${brl(p.valor + p.troco)}, troco ${brl(p.troco)})</span>` : ''}</span><b>${brl(p.valor)}</b><button class="iconbtn" data-a="rmPag" data-i="${i}">✕</button></div>`).join('')}</div>` : ''}
   ${falta > 0 ? `<div class="pays">${FORMAS.map(f => `<button class="pay ${f.cls}" data-a="forma" data-f="${f.id}">${f.nome}<small>${brl(st.parcial ?? falta)}</small></button>`).join('')}</div>
     <button class="btn block" style="min-height:48px" data-a="dividir">${st.parcial != null ? 'Valor parcial: ' + brl(st.parcial) + ' (trocar)' : 'Dividir em duas formas'}</button>`
     : `<button class="btn ok block" style="min-height:72px;font-size:21px" data-a="finalizar">Confirmar venda${troco ? ' · troco ' + brl(troco) : ''}</button>`}
-  <p class="muted small">Confirme só depois que a maquininha aprovar.</p>`;
+  <p class="muted small">${S.cfg.tap ? 'Débito e crédito abrem o InfiniteTap com o valor. ' : ''}Confirme só depois que a maquininha aprovar.</p>`;
 }
 function shShow() {
   const l = lote(); const at = showAtual(l);
@@ -1163,9 +1171,13 @@ const A = {
     if (f === 'credito') { S.sheet = { k: 'pagar', forma: 'credito', valor }; renderSheet(); return; }
     if (f === 'outro') { perguntar({ titulo: 'Qual meio de pagamento?', texto: `${brl(valor)} fora da InfinitePay`, ph: 'ex.: Pix Sicoob', obrig: true, ok: 'Confirmar', chips: ['Pix Sicoob', 'Mercado Pago', 'Transferência', 'PicPay'] })
       .then(nome => { if (nome) S.pagamentos.push({ forma: 'outro', valor, nome }); S.sheet = { k: 'pagar' }; renderSheet(); }); return; }
+    if (f === 'debito' && S.cfg.tap) { Tap.cobrar({ forma: 'debito', valor }); return; }
     S.pagamentos.push({ forma: f, valor }); S.sheet = { k: 'pagar' }; vibrate(15); renderSheet();
   },
-  parcelas: e => { S.pagamentos.push({ forma: 'credito', valor: S.sheet.valor, parcelas: +e.dataset.n }); S.sheet = { k: 'pagar' }; vibrate(15); renderSheet(); },
+  parcelas: e => { if (S.cfg.tap) { Tap.cobrar({ forma: 'credito', valor: S.sheet.valor, parcelas: +e.dataset.n }); return; } S.pagamentos.push({ forma: 'credito', valor: S.sheet.valor, parcelas: +e.dataset.n }); S.sheet = { k: 'pagar' }; vibrate(15); renderSheet(); },
+  tapOk: () => Tap.confirmar({}),
+  tapAbrir: () => Tap.abrir(S.sheet.tap),
+  tapMaq: () => { const t = S.sheet.tap; S.pagamentos.push({ forma: t.forma, valor: t.valor, ...(t.parcelas > 1 || t.forma === 'credito' ? { parcelas: t.parcelas } : {}) }); S.sheet = { k: 'pagar' }; vibrate(15); renderSheet(); },
   recebido: e => { $('#recebido').value = String(e.dataset.v).replace('.', ','); $('#recebido').dispatchEvent(new Event('input')); },
   confDinheiro: () => { const v = S.sheet.valor; const rec = num($('#recebido').value) || v; if (rec < v - 0.001) { toast('Valor recebido menor que o devido', null, true); return; } S.pagamentos.push({ forma: 'dinheiro', valor: v, troco: +(rec - v).toFixed(2) }); S.sheet = { k: 'pagar' }; vibrate(15); renderSheet(); },
   volPag: () => { S.sheet = { k: 'pagar' }; renderSheet(); },
@@ -1178,7 +1190,7 @@ const A = {
     // número sequencial por caixa dentro do lote (C1-1, C1-2…): cada celular numera o seu, sem repetir entre caixas
     const num = 1 + Math.max(0, ...S.vendas.filter(x => x.loteId === l.id && x.cx === cx).map(x => x.num || 0));
     const v = { id: uid(), num, cx, loteId: l.id, showId: sh?.id, ts: rt ? rt.ts : now(), itens: S.cart.map(c => ({ sku: c.sku, qtd: c.qtd, preco: c.preco, ...(c.semSaldo ? { semSaldo: c.semSaldo } : {}) })),
-      desconto: S.cartDesc, descMotivo: S.cartDesc ? S.cartDescMotivo : '', pagamentos: S.pagamentos.map(p => ({ forma: p.forma, valor: p.valor, ...(p.parcelas ? { parcelas: p.parcelas } : {}), ...(p.nome ? { nome: p.nome } : {}) })),
+      desconto: S.cartDesc, descMotivo: S.cartDesc ? S.cartDescMotivo : '', pagamentos: S.pagamentos.map(p => ({ forma: p.forma, valor: p.valor, ...(p.parcelas ? { parcelas: p.parcelas } : {}), ...(p.nome ? { nome: p.nome } : {}), ...(p.tap ? { tap: p.tap } : {}) })),
       troco: S.pagamentos.reduce((a, p) => a + (p.troco || 0), 0), vendedor: rt ? rt.nome : nomeVendedor(), vendedorId: rt ? rt.vendedorId : sessao()?.id || '', caixa: S.cfg.caixa, aparelho: S.cfg.aparelho, status: 'ok',
       ...(rt ? { retro: { por: S.cfg.vendedor || 'gestor', em: now() } } : {}) };
     S.vendas.push(v); await DB.put('vendas', v);
@@ -1311,10 +1323,10 @@ async function salvarMov(fd) {
 document.addEventListener('submit', async ev => {
   const f = ev.target; const k = f.dataset.f; if (!k) return; ev.preventDefault(); const fd = new FormData(f);
   if (k === 'texto') { const r = S.sheet.res; const v = fd.get('v'); S.sheet = null; r && r(v); return; }
-  if (k === 'cfg' && !fd.has('cfopBonif')) { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.caixaCod = (fd.get('caixaCod') || '').trim().toUpperCase(); S.cfg.tema = fd.get('tema'); await saveCfg(); S.view = 'home'; render(); toast('Salvo'); return; }
+  if (k === 'cfg' && !fd.has('cfopBonif')) { S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.caixaCod = (fd.get('caixaCod') || '').trim().toUpperCase(); S.cfg.tema = fd.get('tema'); salvarTapCfg(fd); await saveCfg(); S.view = 'home'; render(); toast('Salvo'); return; }
   if (k === 'cfg') { const pn = (fd.get('pinNovo') || '').trim();
     if (pn) { if (!/^\d{4,8}$/.test(pn) || pn !== (fd.get('pinConf') || '').trim()) { toast('PIN: 4 a 8 números, iguais nos dois campos', null, true); return; } S.cfg.pinHash = await hashPin(pn); Perfil.ate = Date.now() + 15 * 60e3; }
-    S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.caixaCod = (fd.get('caixaCod') || '').trim().toUpperCase(); S.cfg.tema = fd.get('tema'); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); if (num(fd.get('das')) !== S.cfg.das) S.cfg.dasRef = `informado em ${fmtDT(now())} por ${S.cfg.vendedor || '—'}`; S.cfg.das = num(fd.get('das')); S.cfg.comissaoPct = num(fd.get('comissaoPct')); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
+    S.cfg.vendedor = fd.get('vendedor').trim(); S.cfg.caixa = fd.get('caixa').trim(); S.cfg.caixaCod = (fd.get('caixaCod') || '').trim().toUpperCase(); S.cfg.tema = fd.get('tema'); salvarTapCfg(fd); S.cfg.cfopBonif = fd.get('cfopBonif').trim(); S.cfg.cfopPerda = fd.get('cfopPerda').trim(); if (num(fd.get('das')) !== S.cfg.das) S.cfg.dasRef = `informado em ${fmtDT(now())} por ${S.cfg.vendedor || '—'}`; S.cfg.das = num(fd.get('das')); S.cfg.comissaoPct = num(fd.get('comissaoPct')); Object.keys(S.cfg.taxas).forEach(k => { if (fd.get('tx_' + k) !== null) S.cfg.taxas[k] = num(fd.get('tx_' + k)); });
     const urlAntes = S.cfg.sincUrl; S.cfg.sincUrl = (fd.get('sincUrl') || '').trim(); S.cfg.sincChave = (fd.get('sincChave') || '').trim(); await saveCfg();
     if (Sinc.ativo() && S.cfg.sincUrl !== urlAntes) { // servidor novo: sobe tudo o que existe neste aparelho
       S.lotes.forEach(l => Sinc.st.pend['lote:' + l.id] = ++Sinc.cont); S.vendas.forEach(v => Sinc.st.pend['venda:' + v.id] = ++Sinc.cont); S.movs.forEach(m => Sinc.st.pend['mov:' + m.id] = ++Sinc.cont);
@@ -1658,6 +1670,57 @@ function relatorioHTML(l) {
   <p class="foot">PDF gerado em: ${esc(S.cfg.caixa || 'celular sem nome')} (${esc(codCaixa())}) por ${esc(nomeVendedor() || '—')} · caixas com vendas no lote: ${[...new Set(vendasLote(l, true).map(v => v.cx ? `${v.cx}${v.caixa ? ' · ' + v.caixa : ''}` : (v.caixa || '—')))].map(esc).join('; ') || '—'} · ${vendasLote(l, true).length} registros de venda, ${S.movs.filter(m => m.loteId === l.id).length} de bonificação.</p>`;
 }
 
+// ---------- InfiniteTap (celular como maquininha) ----------
+// O PDV abre o app da InfinitePay por deeplink com valor, forma e parcelas (doc: infinitepay.io/checkout-tap).
+// O retorno (result_url) volta para este endereço com ?tap=1&order_id=…&nsu=…; se o celular abrir o PDV de novo,
+// a cobrança se confirma sozinha. Se não voltar, o vendedor toca em "Aprovou" e a conciliação pelo extrato continua igual.
+function salvarTapCfg(fd) { S.cfg.tap = fd.get('tap') === '1'; if (fd.has('tapHandle')) S.cfg.tapHandle = (fd.get('tapHandle') || '').trim().replace(/^\$/, ''); }
+const Tap = {
+  CHAVE: 'pdvTapRetorno',
+  ios: () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1),
+  cobrar({ forma, valor, parcelas = 1 }) {
+    if (valor < 1) { toast('O InfiniteTap cobra no mínimo R$ 1,00', null, true); return; }
+    if (forma === 'credito' && valor / parcelas < 1) { toast('Cada parcela precisa ter pelo menos R$ 1,00', null, true); return; }
+    const t = { forma, valor: +valor.toFixed(2), parcelas: forma === 'credito' ? parcelas : 1, order: `${codCaixa()}-${Date.now().toString(36).toUpperCase()}` };
+    S.sheet = { k: 'pagar', tap: t }; renderSheet(); this.abrir(t);
+  },
+  abrir(t) {
+    const q = new URLSearchParams({ amount: String(Math.round(t.valor * 100)), payment_method: t.forma === 'credito' ? 'credit' : 'debit', order_id: t.order,
+      result_url: location.origin + location.pathname + '?tap=1', app_client_referrer: 'PDVShowsIndiao' });
+    if (t.forma === 'credito') q.set('installments', String(t.parcelas));
+    if (S.cfg.tapHandle) q.set('handle', S.cfg.tapHandle);
+    if (this.ios()) q.set('af_force_deeplink', 'true');
+    if (!navigator.onLine) toast('Sem internet: o InfiniteTap precisa de sinal para aprovar', null, true);
+    location.href = 'infinitepaydash://infinitetap-app?' + q.toString();
+  },
+  confirmar(ret) {
+    const t = S.sheet && S.sheet.tap; if (!t) return;
+    S.pagamentos.push({ forma: t.forma, valor: t.valor, ...(t.forma === 'credito' ? { parcelas: t.parcelas } : {}),
+      tap: { order: t.order, ...(ret.nsu ? { nsu: ret.nsu, aut: ret.aut || '', band: ret.card_brand || '' } : {}) } });
+    S.sheet = { k: 'pagar' }; vibrate(15); renderSheet();
+  },
+  // lê o retorno do app da InfinitePay (na URL desta aba ou gravado por outra aba)
+  lerUrl() {
+    const u = new URLSearchParams(location.search); if (!u.has('tap')) return;
+    const r = {}; ['order_id', 'nsu', 'aut', 'card_brand', 'warning'].forEach(k => { if (u.get(k)) r[k] = u.get(k); }); r.em = Date.now();
+    try { localStorage.setItem(this.CHAVE, JSON.stringify(r)); } catch (e) { }
+    history.replaceState(null, '', location.pathname);
+  },
+  aplicar() {
+    let r; try { r = JSON.parse(localStorage.getItem(this.CHAVE) || 'null'); } catch (e) { } if (!r) return;
+    if (Date.now() - r.em > 30 * 60e3) { try { localStorage.removeItem(this.CHAVE); } catch (e) { } return; }
+    const t = S.sheet && S.sheet.tap;
+    if (!t) { if (!this.avisado) { this.avisado = true; toast(r.nsu && !r.warning ? `InfiniteTap aprovou o pedido ${r.order_id || ''}. Volte para a venda e toque em "Aprovou".` : 'O InfiniteTap voltou sem aprovação.', null, !r.nsu); } return; }
+    if (r.order_id !== t.order) return;
+    try { localStorage.removeItem(this.CHAVE); } catch (e) { }
+    if (r.nsu && !r.warning) { toast(`InfiniteTap aprovado${r.card_brand ? ' · ' + r.card_brand : ''}`); this.confirmar(r); }
+    else { t.erro = r.warning ? 'InfiniteTap: ' + r.warning : 'O InfiniteTap não aprovou. Tente de novo ou use outra forma.'; renderSheet(); }
+  },
+};
+addEventListener('storage', e => { if (e.key === Tap.CHAVE) Tap.aplicar(); });
+addEventListener('focus', () => Tap.aplicar());
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') Tap.aplicar(); });
+
 // ---------- fotos offline, persistência, tela ligada ----------
 async function baixarFotos() {
   const urls = [...new Set([...S.produtos.values()].map(p => fotoDe(p)).filter(u => /^https?:/.test(u)))]; const st = $('#fotosStatus');
@@ -1679,6 +1742,7 @@ addEventListener('online', () => { render(); Sinc.ciclo(); }); addEventListener(
 
 // ---------- início ----------
 (async function boot() {
+  Tap.lerUrl();
   await DB.open();
   const [ps, ls, vs, ms, meta] = await Promise.all(['produtos', 'lotes', 'vendas', 'movs', 'meta'].map(s => DB.all(s)));
   ps.forEach(p => S.produtos.set(p.sku, p)); S.lotes = ls; S.vendas = vs; S.movs = ms;
@@ -1690,7 +1754,7 @@ addEventListener('online', () => { render(); Sinc.ciclo(); }); addEventListener(
   if (!S.cfg.aparelho) { S.cfg.aparelho = uid(); saveCfg(); }
   if (!S.cfg.das) { S.cfg.das = DAS_MODELAGEM.pct; S.cfg.dasRef = `${DAS_MODELAGEM.ref} · ${DAS_MODELAGEM.fonte}`; saveCfg(); }
   const sc = meta.find(m => m.k === 'sinc'); if (sc) Sinc.st = { ...Sinc.st, ...sc.v }; Sinc.cont = Math.max(0, ...Object.values(Sinc.st.pend));
-  render();
+  render(); Tap.aplicar();
   setInterval(() => { if (document.visibilityState === 'visible') Sinc.ciclo(); }, 15000); Sinc.ciclo();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) { }
